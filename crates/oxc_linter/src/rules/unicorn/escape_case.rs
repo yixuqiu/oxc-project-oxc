@@ -4,19 +4,16 @@ use oxc_ast::{
     ast::{StringLiteral, TemplateLiteral},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode, Fix};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(escape-case): Use uppercase characters for the value of the escape sequence.")]
-#[diagnostic(severity(warning))]
-struct EscapeCaseDiagnostic(#[label] pub Span);
+fn escape_case_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use uppercase characters for the value of the escape sequence.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct EscapeCase;
@@ -26,21 +23,29 @@ declare_oxc_lint!(
     ///
     /// Enforces defining escape sequence values with uppercase characters rather than lowercase ones. This promotes readability by making the escaped value more distinguishable from the identifier.
     ///
-    /// ### Example
+    /// ### Why is this bad?
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // fail
     /// const foo = '\xa9';
     /// const foo = '\ud834';
     /// const foo = '\u{1d306}';
     /// const foo = '\ca';
-    /// // pass
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const foo = '\xA9';
     /// const foo = '\uD834';
     /// const foo = '\u{1D306}';
     /// const foo = '\cA';
     /// ```
     EscapeCase,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 fn is_hex_char(c: char) -> bool {
@@ -128,7 +133,9 @@ impl Rule for EscapeCase {
             AstKind::StringLiteral(StringLiteral { span, .. }) => {
                 let text = span.source_text(ctx.source_text());
                 if let Some(fixed) = check_case(text, false) {
-                    ctx.diagnostic_with_fix(EscapeCaseDiagnostic(*span), || Fix::new(fixed, *span));
+                    ctx.diagnostic_with_fix(escape_case_diagnostic(*span), |fixer| {
+                        fixer.replace(*span, fixed)
+                    });
                 }
             }
             AstKind::TemplateLiteral(TemplateLiteral { quasis, .. }) => {
@@ -136,8 +143,8 @@ impl Rule for EscapeCase {
                     if let Some(fixed) =
                         check_case(quasi.span.source_text(ctx.source_text()), false)
                     {
-                        ctx.diagnostic_with_fix(EscapeCaseDiagnostic(quasi.span), || {
-                            Fix::new(fixed, quasi.span)
+                        ctx.diagnostic_with_fix(escape_case_diagnostic(quasi.span), |fixer| {
+                            fixer.replace(quasi.span, fixed)
                         });
                     }
                 });
@@ -145,8 +152,8 @@ impl Rule for EscapeCase {
             AstKind::RegExpLiteral(regex) => {
                 let text = regex.span.source_text(ctx.source_text());
                 if let Some(fixed) = check_case(text, true) {
-                    ctx.diagnostic_with_fix(EscapeCaseDiagnostic(regex.span), || {
-                        Fix::new(fixed, regex.span)
+                    ctx.diagnostic_with_fix(escape_case_diagnostic(regex.span), |fixer| {
+                        fixer.replace(regex.span, fixed)
                     });
                 }
             }
@@ -277,5 +284,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(EscapeCase::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(EscapeCase::NAME, EscapeCase::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

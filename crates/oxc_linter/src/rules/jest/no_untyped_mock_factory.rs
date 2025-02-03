@@ -1,28 +1,20 @@
-use crate::{
-    context::LintContext,
-    fixer::Fix,
-    rule::Rule,
-    utils::{collect_possible_jest_call_node, PossibleJestNode},
-};
-
 use oxc_ast::{
     ast::{Argument, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-untyped-mock-factory): Disallow using `jest.mock()` factories without an explicit type parameter.")]
-#[diagnostic(
-    severity(warning),
-    help("Add a type parameter to the mock factory such as `typeof import({0:?})`")
-)]
-struct AddTypeParameterToModuleMockDiagnostic(CompactStr, #[label] pub Span);
+use crate::{context::LintContext, rule::Rule, utils::PossibleJestNode};
+
+fn add_type_parameter_to_module_mock_diagnostic(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "`jest.mock()` factories should not be used without an explicit type parameter.",
+    )
+    .with_help(format!("Add a type parameter to the mock factory such as `typeof import({x0:?})`"))
+    .with_label(span1)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUntypedMockFactory;
@@ -91,18 +83,22 @@ declare_oxc_lint!(
     /// ```
     ///
     NoUntypedMockFactory,
+    jest,
     style,
+    conditional_fix
 );
 
 impl Rule for NoUntypedMockFactory {
-    fn run_once(&self, ctx: &LintContext<'_>) {
-        if !ctx.source_type().is_typescript() {
-            return;
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
+    }
 
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn should_run(&self, ctx: &crate::context::ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -119,7 +115,7 @@ impl NoUntypedMockFactory {
             return;
         };
 
-        if call_expr.arguments.len() != 2 && (property_name != "mock" || property_name != "doMock")
+        if call_expr.arguments.len() != 2 || (property_name != "mock" && property_name != "doMock")
         {
             return;
         }
@@ -141,25 +137,23 @@ impl NoUntypedMockFactory {
 
         if let Expression::StringLiteral(string_literal) = expr {
             ctx.diagnostic_with_fix(
-                AddTypeParameterToModuleMockDiagnostic(
-                    string_literal.value.to_compact_str(),
+                add_type_parameter_to_module_mock_diagnostic(
+                    string_literal.value.as_str(),
                     property_span,
                 ),
-                || {
-                    let mut content = ctx.codegen();
-                    content.print_str(b"<typeof import('");
-                    content.print_str(string_literal.value.as_bytes());
-                    content.print_str(b"')>(");
+                |fixer| {
+                    let mut content = fixer.codegen();
+                    content.print_str("<typeof import('");
+                    content.print_str(string_literal.value.as_str());
+                    content.print_str("')>(");
+                    let span = Span::sized(string_literal.span.start - 1, 1);
 
-                    Fix::new(
-                        content.into_source_text(),
-                        Span::new(string_literal.span.start - 1, string_literal.span.start),
-                    )
+                    fixer.replace(span, content)
                 },
             );
         } else if let Expression::Identifier(ident) = expr {
-            ctx.diagnostic(AddTypeParameterToModuleMockDiagnostic(
-                ident.name.to_compact_str(),
+            ctx.diagnostic(add_type_parameter_to_module_mock_diagnostic(
+                ident.name.as_str(),
                 property_span,
             ));
         }
@@ -282,6 +276,7 @@ fn test() {
             ",
             None,
         ),
+        ("test.skip('basic', async () => {});", None),
     ];
 
     let fail = vec![
@@ -407,7 +402,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoUntypedMockFactory::NAME, pass, fail)
+    Tester::new(NoUntypedMockFactory::NAME, NoUntypedMockFactory::PLUGIN, pass, fail)
         .with_jest_plugin(true)
         .expect_fix(fix)
         .test_and_snapshot();

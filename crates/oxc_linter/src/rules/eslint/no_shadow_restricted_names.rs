@@ -1,17 +1,16 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
+use oxc_syntax::symbol::SymbolId;
 
 use crate::{context::LintContext, globals::PRE_DEFINE_VAR, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-shadow-restricted-names): Shadowing of global properties such as 'undefined' is not allowed.")]
-#[diagnostic(severity(warning), help("Shadowing of global properties '{0}'."))]
-struct NoShadowRestrictedNamesDiagnostic(CompactStr, #[label] pub Span);
+fn no_shadow_restricted_names_diagnostic(shadowed_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Shadowing of global properties such as 'undefined' is not allowed.")
+        .with_help(format!("Shadowing of global properties '{shadowed_name}'."))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoShadowRestrictedNames;
@@ -35,48 +34,47 @@ declare_oxc_lint!(
     /// try {} catch(eval){}
     /// ```
     NoShadowRestrictedNames,
+    eslint,
     correctness
 );
 
-#[inline]
-fn check_and_diagnostic(s: &str, span: Span, ctx: &LintContext) {
-    if PRE_DEFINE_VAR.contains_key(s) {
-        ctx.diagnostic(NoShadowRestrictedNamesDiagnostic(s.into(), span));
-    }
-}
-
 impl Rule for NoShadowRestrictedNames {
-    fn run_once(&self, ctx: &LintContext<'_>) {
-        ctx.symbols().iter().for_each(|symbol_id| {
-            let name = ctx.symbols().get_name(symbol_id);
+    fn run_on_symbol(&self, symbol_id: SymbolId, ctx: &LintContext<'_>) {
+        let name = ctx.symbols().get_name(symbol_id);
 
-            if name == "undefined" {
-                // Allow to declare `undefined` variable but not allow to assign value to it.
-                let node_id = ctx.semantic().symbols().get_declaration(symbol_id);
-                if let AstKind::VariableDeclarator(declarator) = ctx.nodes().kind(node_id) {
-                    if declarator.init.is_none()
-                        && ctx
-                            .symbols()
-                            .get_resolved_references(symbol_id)
-                            .all(|reference| !reference.is_write())
-                    {
-                        return;
-                    }
+        if !PRE_DEFINE_VAR.contains_key(name) {
+            return;
+        }
+
+        if name == "undefined" {
+            // Allow to declare `undefined` variable but not allow to assign value to it.
+            let node_id = ctx.semantic().symbols().get_declaration(symbol_id);
+            if let AstKind::VariableDeclarator(declarator) = ctx.nodes().kind(node_id) {
+                if declarator.init.is_none()
+                    && ctx
+                        .symbols()
+                        .get_resolved_references(symbol_id)
+                        .all(|reference| !reference.is_write())
+                {
+                    return;
                 }
             }
+        }
 
-            check_and_diagnostic(name, ctx.symbols().get_span(symbol_id), ctx);
-            for span in ctx.symbols().get_redeclare_variables(symbol_id) {
-                check_and_diagnostic(name, *span, ctx);
-            }
-        });
+        let span = ctx.symbols().get_span(symbol_id);
+        ctx.diagnostic(no_shadow_restricted_names_diagnostic(name, span));
+
+        for &span in ctx.symbols().get_redeclarations(symbol_id) {
+            ctx.diagnostic(no_shadow_restricted_names_diagnostic(name, span));
+        }
     }
 }
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use serde_json::json;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         ("function foo(bar){ var baz; }", None),
@@ -121,31 +119,50 @@ fn test() {
 
     let fail = vec![
         ("function NaN(NaN) { var NaN; !function NaN(NaN) { try {} catch(NaN) {} }; }", None),
-        ("function undefined(undefined) { !function undefined(undefined) { try {} catch(undefined) {} }; }", None),
-        ("function Infinity(Infinity) { var Infinity; !function Infinity(Infinity) { try {} catch(Infinity) {} }; }", None),
-        ("function arguments(arguments) { var arguments; !function arguments(arguments) { try {} catch(arguments) {} }; }", None),
+        (
+            "function undefined(undefined) { !function undefined(undefined) { try {} catch(undefined) {} }; }",
+            None,
+        ),
+        (
+            "function Infinity(Infinity) { var Infinity; !function Infinity(Infinity) { try {} catch(Infinity) {} }; }",
+            None,
+        ),
+        (
+            "function arguments(arguments) { var arguments; !function arguments(arguments) { try {} catch(arguments) {} }; }",
+            None,
+        ),
         ("function eval(eval) { var eval; !function eval(eval) { try {} catch(eval) {} }; }", None),
-        ("var eval = (eval) => { var eval; !function eval(eval) { try {} catch(eval) {} }; }", Some(json!({
-            "parserOptions": {
-                "ecmaVersion": 6
-            }
-        }))),
-        ("var {undefined} = obj; var {a: undefined} = obj; var {a: {b: {undefined}}} = obj; var {a, ...undefined} = obj;", Some(json!({
-            "parserOptions": {
-                "ecmaVersion": 9
-            }
-        }))),
+        (
+            "var eval = (eval) => { var eval; !function eval(eval) { try {} catch(eval) {} }; }",
+            Some(json!({
+                "parserOptions": {
+                    "ecmaVersion": 6
+                }
+            })),
+        ),
+        (
+            "var {undefined} = obj; var {a: undefined} = obj; var {a: {b: {undefined}}} = obj; var {a, ...undefined} = obj;",
+            Some(json!({
+                "parserOptions": {
+                    "ecmaVersion": 9
+                }
+            })),
+        ),
         ("var normal, undefined; undefined = 5;", None),
         ("try {} catch(undefined: undefined) {}", None),
-        ("var [undefined] = [1]", Some(json!({
-            "parserOptions": {
-                "ecmaVersion": 6
-            }
-        }))),
+        (
+            "var [undefined] = [1]",
+            Some(json!({
+                "parserOptions": {
+                    "ecmaVersion": 6
+                }
+            })),
+        ),
         ("class undefined { }", None),
         ("class foo { undefined(undefined) { } }", None),
         ("class foo { #undefined(undefined) { } }", None),
     ];
 
-    Tester::new(NoShadowRestrictedNames::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoShadowRestrictedNames::NAME, NoShadowRestrictedNames::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

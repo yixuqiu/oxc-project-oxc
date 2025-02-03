@@ -1,71 +1,80 @@
 use std::path::PathBuf;
 
-use oxc_diagnostics::{
-    miette::{self, miette, Diagnostic, LabeledSpan},
-    thiserror::{self, Error},
-    Severity,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_semantic::ModuleRecord;
-use oxc_span::{CompactStr, Span};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::{context::LintContext, rule::Rule};
+use oxc_diagnostics::{LabeledSpan, OxcDiagnostic};
+use oxc_macros::declare_oxc_lint;
+use oxc_span::{CompactStr, Span};
 
-#[derive(Debug, Error, Diagnostic)]
-enum ExportDiagnostic {
-    #[error("eslint-plugin-import(export): No named exports found in module '{1}'")]
-    #[diagnostic(severity(warning))]
-    NoNamedExport(#[label] Span, CompactStr),
+use crate::{context::LintContext, rule::Rule, ModuleRecord};
+
+fn no_named_export(module_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("No named exports found in module '{module_name}'"))
+        .with_label(span)
 }
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/docs/rules/export.md>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/export.md>
 #[derive(Debug, Default, Clone)]
 pub struct Export;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Reports funny business with exports, like repeated exports of names or defaults.
     ///
-    /// ### Example
+    /// ### Why is this bad?
+    ///
+    /// Having multiple exports of the same name can lead to ambiguity and confusion
+    /// in the codebase. It makes it difficult to track which export is being used
+    /// and can result in runtime errors if the wrong export is referenced.
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
     /// let foo;
     /// export { foo }; // Multiple exports of name 'foo'.
-    /// export * from "./export-all" // export-all.js also export foo
+    /// export * from "./export-all"; // Conflicts if export-all.js also exports foo
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// let foo;
+    /// export { foo as foo1 }; // Renamed export to avoid conflict
+    /// export * from "./export-all"; // No conflict if export-all.js also exports foo
     /// ```
     Export,
+
+    import,
     nursery
 );
 
 impl Rule for Export {
     fn run_once(&self, ctx: &LintContext<'_>) {
-        let module_record = ctx.semantic().module_record();
+        let module_record = ctx.module_record();
         let named_export = &module_record.exported_bindings;
 
         let mut all_export_names = FxHashMap::default();
         let mut visited = FxHashSet::default();
 
+        let loaded_modules = module_record.loaded_modules.read().unwrap();
         module_record.star_export_entries.iter().for_each(|star_export_entry| {
+            if star_export_entry.is_type {
+                return;
+            }
             let mut export_names = FxHashSet::default();
 
-            let Some(module_request) = &star_export_entry.module_request else { return };
-            let Some(remote_module_record_ref) =
-                module_record.loaded_modules.get(module_request.name())
-            else {
+            let Some(module_request) = &star_export_entry.module_request else {
+                return;
+            };
+            let Some(remote_module_record) = loaded_modules.get(module_request.name()) else {
                 return;
             };
 
-            walk_exported_recursive(
-                remote_module_record_ref.value(),
-                &mut export_names,
-                &mut visited,
-            );
+            walk_exported_recursive(remote_module_record, &mut export_names, &mut visited);
 
             if export_names.is_empty() {
-                ctx.diagnostic(ExportDiagnostic::NoNamedExport(
-                    module_request.span(),
-                    module_request.name().clone(),
-                ));
+                ctx.diagnostic(no_named_export(module_request.name(), module_request.span()));
             } else {
                 all_export_names.insert(star_export_entry.span, export_names);
             }
@@ -83,35 +92,14 @@ impl Rule for Export {
                 })
                 .collect::<Vec<_>>();
 
-            for name_span in &module_record.exported_bindings_duplicated {
-                if name == name_span.name() {
-                    spans.push(name_span.span());
-                }
-            }
-
             if !spans.is_empty() {
                 spans.push(*span);
                 let labels = spans.into_iter().map(LabeledSpan::underline).collect::<Vec<_>>();
 
-                ctx.diagnostic(miette!(
-                    severity = Severity::Warning,
-                    labels = labels,
-                    "eslint-plugin-import(export): Multiple exports of name '{name}'."
-                ));
-            }
-        }
-
-        if !module_record.export_default_duplicated.is_empty() {
-            let mut spans = module_record.export_default_duplicated.clone();
-            if let Some(span) = module_record.export_default {
-                spans.push(span);
-                let labels = spans.into_iter().map(LabeledSpan::underline).collect::<Vec<_>>();
-
-                ctx.diagnostic(miette!(
-                    severity = Severity::Warning,
-                    labels = labels,
-                    "eslint-plugin-import(export): Multiple default exports."
-                ));
+                ctx.diagnostic(
+                    OxcDiagnostic::warn(format!("Multiple exports of name '{name}'."))
+                        .with_labels(labels),
+                );
             }
         }
     }
@@ -135,16 +123,15 @@ fn walk_exported_recursive(
     for name in module_record.exported_bindings.keys() {
         result.insert(name.clone());
     }
+    let loaded_modules = module_record.loaded_modules.read().unwrap();
     for export_entry in &module_record.star_export_entries {
         let Some(module_request) = &export_entry.module_request else {
             continue;
         };
-        let Some(remote_module_record_ref) =
-            module_record.loaded_modules.get(module_request.name())
-        else {
+        let Some(remote_module_record) = loaded_modules.get(module_request.name()) else {
             continue;
         };
-        walk_exported_recursive(remote_module_record_ref.value(), result, visited);
+        walk_exported_recursive(remote_module_record, result, visited);
     }
 }
 
@@ -278,6 +265,7 @@ fn test() {
                 const Bar = 2;
                 export {Bar as default};
             "#),
+            "export type * from './export-props.js'",
         ];
         let fail = vec![
             (r#"let foo; export { foo }; export * from "./export-all""#),
@@ -350,19 +338,9 @@ fn test() {
             //     export const Foo = 'bar';
             //     export namespace Foo { }
             // "),
-            (r#"
-                // declare module "a" {
-                //     const Foo = 1;
-                //     export {Foo as default};
-                // }
-                const Bar = 2;
-                export {Bar as default};
-                const Baz = 3;
-                export {Baz as default};
-            "#),
         ];
 
-        Tester::new(Export::NAME, pass, fail)
+        Tester::new(Export::NAME, Export::PLUGIN, pass, fail)
             .with_import_plugin(true)
             .change_rule_path("index.ts")
             .test_and_snapshot();
@@ -370,8 +348,15 @@ fn test() {
 
     {
         let pass = vec!["export * from './module'"];
-        let fail = vec![];
-        Tester::new(Export::NAME, pass, fail)
+        let fail = vec![
+            ("
+                const Bar = 2;
+                export {Bar as default};
+                const Baz = 3;
+                export {Baz as default};
+            "),
+        ];
+        Tester::new(Export::NAME, Export::PLUGIN, pass, fail)
             .with_import_plugin(true)
             .change_rule_path("export-star-4/index.js")
             .test();

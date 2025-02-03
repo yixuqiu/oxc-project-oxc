@@ -1,26 +1,40 @@
-// use oxc_diagnostics::{
-//     miette::{self, Diagnostic},
-//     thiserror::Error,
-// };
+use oxc_diagnostics::{LabeledSpan, OxcDiagnostic};
 use oxc_macros::declare_oxc_lint;
 // use oxc_span::{CompactStr, Span};
 
-use crate::{context::LintContext, rule::Rule};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
 // #[derive(Debug, Error, Diagnostic)]
-// #[error("eslint-plugin-import(namespace): ")]
+// #[error("")]
 // #[diagnostic(severity(warning), help(""))]
 // struct NoDeprecatedDiagnostic(CompactStr, #[label] pub Span);
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/docs/rules/no-deprecated.md>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/no-deprecated.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoDeprecated;
 
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Reports use of a deprecated name, as indicated by a JSDoc block with a @deprecated tag or TomDoc Deprecated: comment.
+    /// Reports use of a deprecated name, as indicated by a JSDoc block with
+    /// a @deprecated tag or TomDoc Deprecated: comment.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// ```
     NoDeprecated,
+    import,
     nursery
 );
 
@@ -96,7 +110,7 @@ fn test() {
         // r#"import { foo } from "./ts-deprecated.ts"; console.log(foo())"#,
     ];
 
-    Tester::new(NoDeprecated::NAME, pass, fail)
+    Tester::new(NoDeprecated::NAME, NoDeprecated::PLUGIN, pass, fail)
         .change_rule_path("index.js")
         .with_import_plugin(true)
         .test_and_snapshot();

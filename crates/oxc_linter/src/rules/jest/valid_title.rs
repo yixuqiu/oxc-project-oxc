@@ -1,41 +1,37 @@
-use std::{collections::HashMap, hash::Hash};
+use std::hash::Hash;
 
+use cow_utils::CowUtils;
 use oxc_ast::{
     ast::{Argument, BinaryExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{CompactStr, GetSpan, Span};
 use regex::Regex;
+use rustc_hash::FxHashMap;
 
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{
-        collect_possible_jest_call_node, parse_general_jest_fn_call, JestFnKind, JestGeneralFnKind,
-        PossibleJestNode,
-    },
+    utils::{parse_general_jest_fn_call, JestFnKind, JestGeneralFnKind, PossibleJestNode},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(valid-title): {0:?}")]
-#[diagnostic(severity(warning), help("{1:?}"))]
-struct ValidTitleDiagnostic(CompactStr, &'static str, #[label] pub Span);
+fn valid_title_diagnostic(x0: &str, x1: &str, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{x0:?}")).with_help(format!("{x1:?}")).with_label(span2)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ValidTitle(Box<ValidTitleConfig>);
 
 #[derive(Debug, Default, Clone)]
 pub struct ValidTitleConfig {
+    ignore_type_of_test_name: bool,
     ignore_type_of_describe_name: bool,
-    disallowed_words: Vec<String>,
+    disallowed_words: Vec<CompactStr>,
     ignore_space: bool,
-    must_not_match_patterns: HashMap<MatchKind, CompiledMatcherAndMessage>,
-    must_match_patterns: HashMap<MatchKind, CompiledMatcherAndMessage>,
+    must_not_match_patterns: FxHashMap<MatchKind, CompiledMatcherAndMessage>,
+    must_match_patterns: FxHashMap<MatchKind, CompiledMatcherAndMessage>,
 }
 
 impl std::ops::Deref for ValidTitle {
@@ -49,14 +45,21 @@ impl std::ops::Deref for ValidTitle {
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Checks that the title of Jest blocks are valid by ensuring that titles are:
+    /// Checks that the titles of Jest blocks are valid.
     ///
+    /// Titles must be:
     /// - not empty,
-    /// - is a string,
+    /// - strings,
     /// - not prefixed with their block name,
-    /// - have no leading or trailing spaces
+    /// - have no leading or trailing spaces.
+    ///
+    /// Why is this bad?
+    ///
+    /// Titles that are not valid can be misleading and make it harder to understand the purpose of the test.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
     /// describe('', () => {});
     /// describe('foo', () => {
@@ -68,8 +71,26 @@ declare_oxc_lint!(
     /// xit('', () => {});
     /// xtest('', () => {});
     /// ```
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// describe('foo', () => {});
+    /// it('bar', () => {});
+    /// test('baz', () => {});
+    /// ```
+    ///
+    /// ### Options
+    /// interface Options {
+    ///     ignoreSpaces?: boolean;
+    ///     ignoreTypeOfTestName?: boolean;
+    ///     ignoreTypeOfDescribeName?: boolean;
+    ///     disallowedWords?: string[];
+    ///     mustNotMatch?: Partial<Record<'describe' | 'test' | 'it', string>> | string;
+    ///     mustMatch?: Partial<Record<'describe' | 'test' | 'it', string>> | string;
+    /// }
     ValidTitle,
-    correctness
+    jest,
+    correctness,
+    conditional_fix
 );
 
 impl Rule for ValidTitle {
@@ -82,14 +103,13 @@ impl Rule for ValidTitle {
                 .unwrap_or_default()
         };
 
+        let ignore_type_of_test_name = get_as_bool("ignoreTypeOfTestName");
         let ignore_type_of_describe_name = get_as_bool("ignoreTypeOfDescribeName");
         let ignore_space = get_as_bool("ignoreSpaces");
         let disallowed_words = config
             .and_then(|v| v.get("disallowedWords"))
             .and_then(|v| v.as_array())
-            .map(|v| {
-                v.iter().filter_map(|v| v.as_str().map(std::string::ToString::to_string)).collect()
-            })
+            .map(|v| v.iter().filter_map(|v| v.as_str().map(CompactStr::from)).collect())
             .unwrap_or_default();
         let must_not_match_patterns = config
             .and_then(|v| v.get("mustNotMatch"))
@@ -100,6 +120,7 @@ impl Rule for ValidTitle {
             .and_then(compile_matcher_patterns)
             .unwrap_or_default();
         Self(Box::new(ValidTitleConfig {
+            ignore_type_of_test_name,
             ignore_type_of_describe_name,
             disallowed_words,
             ignore_space,
@@ -108,10 +129,12 @@ impl Rule for ValidTitle {
         }))
     }
 
-    fn run_once(&self, ctx: &LintContext) {
-        for node in &collect_possible_jest_call_node(ctx) {
-            self.run(node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        self.run(jest_node, ctx);
     }
 }
 
@@ -137,8 +160,11 @@ impl ValidTitle {
             return;
         };
 
-        let need_report_describe_name = !(self.ignore_type_of_describe_name
-            && matches!(jest_fn_call.kind, JestFnKind::General(JestGeneralFnKind::Describe)));
+        let need_report_name = match jest_fn_call.kind {
+            JestFnKind::General(JestGeneralFnKind::Test) => !self.ignore_type_of_test_name,
+            JestFnKind::General(JestGeneralFnKind::Describe) => !self.ignore_type_of_describe_name,
+            _ => unreachable!(),
+        };
 
         match arg {
             Argument::StringLiteral(string_literal) => {
@@ -168,12 +194,12 @@ impl ValidTitle {
                 if does_binary_expression_contain_string_node(binary_expr) {
                     return;
                 }
-                if need_report_describe_name {
+                if need_report_name {
                     Message::TitleMustBeString.diagnostic(ctx, arg.span());
                 }
             }
             _ => {
-                if need_report_describe_name {
+                if need_report_name {
                     Message::TitleMustBeString.diagnostic(ctx, arg.span());
                 }
             }
@@ -181,7 +207,7 @@ impl ValidTitle {
     }
 }
 
-type CompiledMatcherAndMessage = (Regex, Option<String>);
+type CompiledMatcherAndMessage = (Regex, Option<CompactStr>);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 enum MatchKind {
@@ -209,14 +235,14 @@ impl MatchKind {
 
 fn compile_matcher_patterns(
     matcher_patterns: &serde_json::Value,
-) -> Option<HashMap<MatchKind, CompiledMatcherAndMessage>> {
+) -> Option<FxHashMap<MatchKind, CompiledMatcherAndMessage>> {
     matcher_patterns
         .as_array()
         .map_or_else(
             || {
                 // for `{ "describe": "/pattern/" }`
                 let obj = matcher_patterns.as_object()?;
-                let mut map: HashMap<MatchKind, CompiledMatcherAndMessage> = HashMap::new();
+                let mut map: FxHashMap<MatchKind, CompiledMatcherAndMessage> = FxHashMap::default();
                 for (key, value) in obj {
                     let Some(v) = compile_matcher_pattern(MatcherPattern::String(value)) else {
                         continue;
@@ -230,7 +256,7 @@ fn compile_matcher_patterns(
             },
             |value| {
                 // for `["/pattern/", "message"]`
-                let mut map: HashMap<MatchKind, CompiledMatcherAndMessage> = HashMap::new();
+                let mut map: FxHashMap<MatchKind, CompiledMatcherAndMessage> = FxHashMap::default();
                 let v = &compile_matcher_pattern(MatcherPattern::Vec(value))?;
                 map.insert(MatchKind::Describe, v.clone());
                 map.insert(MatchKind::Test, v.clone());
@@ -242,7 +268,7 @@ fn compile_matcher_patterns(
             || {
                 // for `"/pattern/"`
                 let string = matcher_patterns.as_str()?;
-                let mut map: HashMap<MatchKind, CompiledMatcherAndMessage> = HashMap::new();
+                let mut map: FxHashMap<MatchKind, CompiledMatcherAndMessage> = FxHashMap::default();
                 let v = &compile_matcher_pattern(MatcherPattern::String(
                     &serde_json::Value::String(string.to_string()),
                 ))?;
@@ -265,7 +291,7 @@ fn compile_matcher_pattern(pattern: MatcherPattern) -> Option<CompiledMatcherAnd
         MatcherPattern::Vec(pattern) => {
             let reg_str = pattern.first().and_then(|v| v.as_str()).map(|v| format!("(?u){v}"))?;
             let reg = Regex::new(&reg_str).ok()?;
-            let message = pattern.get(1).map(std::string::ToString::to_string);
+            let message = pattern.get(1).and_then(serde_json::Value::as_str).map(CompactStr::from);
             Some((reg, message))
         }
     }
@@ -284,16 +310,16 @@ fn validate_title(
 
     if !valid_title.disallowed_words.is_empty() {
         let Ok(disallowed_words_reg) = regex::Regex::new(&format!(
-            r#"(?iu)\b(?:{})\b"#,
-            valid_title.disallowed_words.join("|").replace('.', r"\.")
+            r"(?iu)\b(?:{})\b",
+            valid_title.disallowed_words.join("|").cow_replace('.', r"\.")
         )) else {
             return;
         };
 
         if let Some(matched) = disallowed_words_reg.find(title) {
             let error = format!("{} is not allowed in test title", matched.as_str());
-            ctx.diagnostic(ValidTitleDiagnostic(
-                CompactStr::from(error),
+            ctx.diagnostic(valid_title_diagnostic(
+                &error,
                 "It is included in the `disallowedWords` of your config file, try to remove it from your title",
                 span,
             ));
@@ -301,9 +327,12 @@ fn validate_title(
         return;
     }
 
-    // TODO: support fixer
-    if !valid_title.ignore_space && title.trim() != title {
-        Message::AccidentalSpace.diagnostic(ctx, span);
+    let trimmed_title = title.trim();
+    if !valid_title.ignore_space && trimmed_title != title {
+        let (error, help) = Message::AccidentalSpace.detail();
+        ctx.diagnostic_with_fix(valid_title_diagnostic(error, help, span), |fixer| {
+            fixer.replace(span.shrink(1), trimmed_title.to_string())
+        });
     }
 
     let un_prefixed_name = name.trim_start_matches(['f', 'x']);
@@ -311,9 +340,12 @@ fn validate_title(
         return;
     };
 
-    // TODO: support fixer
     if first_word == un_prefixed_name {
-        Message::DuplicatePrefix.diagnostic(ctx, span);
+        let (error, help) = Message::DuplicatePrefix.detail();
+        ctx.diagnostic_with_fix(valid_title_diagnostic(error, help, span), |fixer| {
+            let replaced_title = title[first_word.len()..].trim().to_string();
+            fixer.replace(span.shrink(1), replaced_title)
+        });
         return;
     }
 
@@ -324,11 +356,11 @@ fn validate_title(
     if let Some((regex, message)) = valid_title.must_match_patterns.get(&jest_fn_name) {
         if !regex.is_match(title) {
             let raw_pattern = regex.as_str();
-            let message = message.as_ref().map_or_else(
-                || CompactStr::from(format!("{un_prefixed_name} should match {raw_pattern}")),
-                |message| CompactStr::from(message.as_str()),
-            );
-            ctx.diagnostic(ValidTitleDiagnostic(
+            let message = match message.as_ref() {
+                Some(message) => message.as_str(),
+                None => &format!("{un_prefixed_name} should match {raw_pattern}"),
+            };
+            ctx.diagnostic(valid_title_diagnostic(
                 message,
                 "Make sure the title matches the `mustMatch` of your config file",
                 span,
@@ -339,12 +371,12 @@ fn validate_title(
     if let Some((regex, message)) = valid_title.must_not_match_patterns.get(&jest_fn_name) {
         if regex.is_match(title) {
             let raw_pattern = regex.as_str();
-            let message = message.as_ref().map_or_else(
-                || CompactStr::from(format!("{un_prefixed_name} should not match {raw_pattern}")),
-                |message| CompactStr::from(message.as_str()),
-            );
+            let message = match message.as_ref() {
+                Some(message) => message.as_str(),
+                None => &format!("{un_prefixed_name} should not match {raw_pattern}"),
+            };
 
-            ctx.diagnostic(ValidTitleDiagnostic(
+            ctx.diagnostic(valid_title_diagnostic(
                 message,
                 "Make sure the title not matches the `mustNotMatch` of your config file",
                 span,
@@ -374,15 +406,26 @@ enum Message {
 impl Message {
     fn detail(&self) -> (&'static str, &'static str) {
         match self {
-            Self::TitleMustBeString => ("Title must be a string", "Replace your title with a string"),
-            Self::EmptyTitle => ("Should not have an empty title", "Write a meaningful title for your test"),
-            Self::DuplicatePrefix => ("Should not have duplicate prefix", "The function name has already contains the prefix, try remove the duplicate prefix"),
-            Self::AccidentalSpace => ("Should not have leading or trailing spaces", "Remove the leading or trailing spaces"),
+            Self::TitleMustBeString => {
+                ("Title must be a string", "Replace your title with a string")
+            }
+            Self::EmptyTitle => {
+                ("Should not have an empty title", "Write a meaningful title for your test")
+            }
+            Self::DuplicatePrefix => (
+                "Should not have duplicate prefix",
+                "The function name has already contains the prefix, try remove the duplicate prefix",
+            ),
+            Self::AccidentalSpace => (
+                "Should not have leading or trailing spaces",
+                "Remove the leading or trailing spaces",
+            ),
         }
     }
+
     fn diagnostic(&self, ctx: &LintContext, span: Span) {
         let (error, help) = self.detail();
-        ctx.diagnostic(ValidTitleDiagnostic(CompactStr::from(error), help, span));
+        ctx.diagnostic(valid_title_diagnostic(error, help, span));
     }
 }
 
@@ -541,6 +584,7 @@ fn test() {
             ",
             None,
         ),
+        ("it(abc, function () {})", Some(serde_json::json!([{ "ignoreTypeOfTestName": true }]))),
     ];
 
     let fail = vec![
@@ -882,7 +926,133 @@ fn test() {
             ",
             None,
         ),
+        ("it(abc, function () {})", None),
     ];
 
-    Tester::new(ValidTitle::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    let fix = vec![
+        ("describe(' foo', function () {})", "describe('foo', function () {})"),
+        ("describe.each()(' foo', function () {})", "describe.each()('foo', function () {})"),
+        (
+            "describe.only.each()(' foo', function () {})",
+            "describe.only.each()('foo', function () {})",
+        ),
+        ("describe(' foo foe fum', function () {})", "describe('foo foe fum', function () {})"),
+        ("describe('foo foe fum ', function () {})", "describe('foo foe fum', function () {})"),
+        ("fdescribe(' foo', function () {})", "fdescribe('foo', function () {})"),
+        ("fdescribe(' foo', function () {})", "fdescribe('foo', function () {})"),
+        ("xdescribe(' foo', function () {})", "xdescribe('foo', function () {})"),
+        ("it(' foo', function () {})", "it('foo', function () {})"),
+        ("it.concurrent(' foo', function () {})", "it.concurrent('foo', function () {})"),
+        ("fit(' foo', function () {})", "fit('foo', function () {})"),
+        ("it.skip(' foo', function () {})", "it.skip('foo', function () {})"),
+        ("fit('foo ', function () {})", "fit('foo', function () {})"),
+        ("it.skip('foo ', function () {})", "it.skip('foo', function () {})"),
+        (
+            "
+                import { test as testThat } from '@jest/globals';
+
+                testThat('foo works ', () => {});
+            ",
+            "
+                import { test as testThat } from '@jest/globals';
+
+                testThat('foo works', () => {});
+            ",
+        ),
+        ("xit(' foo', function () {})", "xit('foo', function () {})"),
+        ("test(' foo', function () {})", "test('foo', function () {})"),
+        ("test.concurrent(' foo', function () {})", "test.concurrent('foo', function () {})"),
+        ("test(` foo`, function () {})", "test(`foo`, function () {})"),
+        ("test.concurrent(` foo`, function () {})", "test.concurrent(`foo`, function () {})"),
+        ("test(` foo bar bang`, function () {})", "test(`foo bar bang`, function () {})"),
+        (
+            "test.concurrent(` foo bar bang`, function () {})",
+            "test.concurrent(`foo bar bang`, function () {})",
+        ),
+        ("test(` foo bar bang  `, function () {})", "test(`foo bar bang`, function () {})"),
+        (
+            "test.concurrent(` foo bar bang  `, function () {})",
+            "test.concurrent(`foo bar bang`, function () {})",
+        ),
+        ("xtest(' foo', function () {})", "xtest('foo', function () {})"),
+        ("xtest(' foo  ', function () {})", "xtest('foo', function () {})"),
+        (
+            "
+                describe(' foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+            "
+                describe('foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+        ),
+        (
+            "
+                describe('foo', () => {
+                    it(' bar', () => {})
+                })
+            ",
+            "
+                describe('foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+        ),
+        ("describe('describe foo', function () {})", "describe('foo', function () {})"),
+        ("fdescribe('describe foo', function () {})", "fdescribe('foo', function () {})"),
+        ("xdescribe('describe foo', function () {})", "xdescribe('foo', function () {})"),
+        ("describe('describe foo', function () {})", "describe('foo', function () {})"),
+        ("fdescribe(`describe foo`, function () {})", "fdescribe(`foo`, function () {})"),
+        ("test('test foo', function () {})", "test('foo', function () {})"),
+        ("xtest('test foo', function () {})", "xtest('foo', function () {})"),
+        ("test(`test foo`, function () {})", "test(`foo`, function () {})"),
+        ("test(`test foo test`, function () {})", "test(`foo test`, function () {})"),
+        ("it('it foo', function () {})", "it('foo', function () {})"),
+        ("fit('it foo', function () {})", "fit('foo', function () {})"),
+        ("xit('it foo', function () {})", "xit('foo', function () {})"),
+        ("it('it foos it correctly', function () {})", "it('foos it correctly', function () {})"),
+        (
+            "
+                describe('describe foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+            "
+                describe('foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+        ),
+        (
+            "
+                describe('describe foo', () => {
+                    it('describes things correctly', () => {})
+                })
+            ",
+            "
+                describe('foo', () => {
+                    it('describes things correctly', () => {})
+                })
+            ",
+        ),
+        (
+            "
+                describe('foo', () => {
+                    it('it bar', () => {})
+                })
+            ",
+            "
+                describe('foo', () => {
+                    it('bar', () => {})
+                })
+            ",
+        ),
+    ];
+
+    Tester::new(ValidTitle::NAME, ValidTitle::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

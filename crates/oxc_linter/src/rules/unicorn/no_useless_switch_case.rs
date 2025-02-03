@@ -1,20 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, utils::is_empty_stmt, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-useless-switch-case): Useless case in switch statement.")]
-#[diagnostic(
-    severity(warning),
-    help("Consider removing this case or removing the `default` case.")
-)]
-struct NoUselessSwitchCaseDiagnostic(#[label] pub Span);
+fn no_useless_switch_case_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Useless case in switch statement.")
+        .with_help("Consider removing this case or removing the `default` case.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUselessSwitchCase;
@@ -28,16 +23,20 @@ declare_oxc_lint!(
     ///
     /// An empty case before the last default case is useless.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// switch (foo) {
     /// 	case 1:
     /// 	default:
     /// 		handleDefaultCase();
     /// 		break;
     /// }
-    /// // good:
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// switch (foo) {
     ///	case 1:
     ///	case 2:
@@ -46,7 +45,9 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoUselessSwitchCase,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for NoUselessSwitchCase {
@@ -66,7 +67,7 @@ impl Rule for NoUselessSwitchCase {
         let default_case = default_cases[0];
 
         // Check if the `default` case is the last case
-        if default_case as *const _ != cases.last().unwrap() as *const _ {
+        if !std::ptr::eq(default_case, cases.last().unwrap()) {
             return;
         }
 
@@ -85,7 +86,7 @@ impl Rule for NoUselessSwitchCase {
         }
 
         for case in useless_cases {
-            ctx.diagnostic(NoUselessSwitchCaseDiagnostic(case.span));
+            ctx.diagnostic(no_useless_switch_case_diagnostic(case.span));
         }
     }
 }
@@ -262,5 +263,6 @@ fn test() {
         ",
     ];
 
-    Tester::new(NoUselessSwitchCase::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUselessSwitchCase::NAME, NoUselessSwitchCase::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

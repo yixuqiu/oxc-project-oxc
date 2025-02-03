@@ -1,17 +1,15 @@
 use oxc_ast::{ast::JSXElementName, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, utils::is_in_app_dir, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-head-element): Do not use `<head>` element. Use `<Head />` from `next/head` instead.")]
-#[diagnostic(severity(warning), help("See https://nextjs.org/docs/messages/no-head-element"))]
-struct NoHeadElementDiagnostic(#[label] pub Span);
+fn no_head_element_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not use `<head>` element. Use `<Head />` from `next/head` instead.")
+        .with_help("See https://nextjs.org/docs/messages/no-head-element")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoHeadElement;
@@ -27,28 +25,35 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoHeadElement,
+    nextjs,
     correctness
 );
 
 impl Rule for NoHeadElement {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let Some(full_file_path) = ctx.file_path().to_str() else { return };
-        if is_in_app_dir(full_file_path) {
-            return;
-        }
         if let AstKind::JSXOpeningElement(elem) = node.kind() {
-            let JSXElementName::Identifier(id) = &elem.name else { return };
-            if id.name == "head" {
-                ctx.diagnostic(NoHeadElementDiagnostic(elem.span));
+            let JSXElementName::Identifier(id) = &elem.name else {
+                return;
+            };
+            if id.name != "head" {
+                return;
             }
+            let Some(full_file_path) = ctx.file_path().to_str() else {
+                return;
+            };
+            if is_in_app_dir(full_file_path) {
+                return;
+            }
+            ctx.diagnostic(no_head_element_diagnostic(elem.span));
         }
     }
 }
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use std::path::PathBuf;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         (
@@ -166,5 +171,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoHeadElement::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoHeadElement::NAME, NoHeadElement::PLUGIN, pass, fail).test_and_snapshot();
 }

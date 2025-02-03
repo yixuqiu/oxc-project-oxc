@@ -1,8 +1,5 @@
 use oxc_ast::{ast::MemberExpression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
@@ -11,10 +8,11 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(require-array-join-separator): Enforce using the separator argument with Array#join()")]
-#[diagnostic(severity(warning), help("Missing the separator argument."))]
-struct RequireArrayJoinSeparatorDiagnostic(#[label] pub Span);
+fn require_array_join_separator_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Enforce using the separator argument with Array#join()")
+        .with_help("Missing the separator argument.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireArrayJoinSeparator;
@@ -30,15 +28,20 @@ declare_oxc_lint!(
     /// instead of relying on the default comma (',') separator.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// foo.join()
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// foo.join()
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// foo.join(",")
     /// ```
     RequireArrayJoinSeparator,
-    style
+    unicorn,
+    style,
+    conditional_fix
 );
 
 fn is_array_prototype_property(member_expr: &MemberExpression, property: &str) -> bool {
@@ -60,10 +63,36 @@ impl Rule for RequireArrayJoinSeparator {
             && !call_expr.optional
             && !matches!(member_expr, MemberExpression::ComputedMemberExpression(_))
         {
-            ctx.diagnostic(RequireArrayJoinSeparatorDiagnostic(Span::new(
-                member_expr.span().end,
-                call_expr.span.end,
-            )));
+            ctx.diagnostic_with_fix(
+                require_array_join_separator_diagnostic(Span::new(
+                    member_expr.span().end,
+                    call_expr.span.end,
+                )),
+                |fixer| {
+                    // after end of `join`, find the `(` and insert `","`
+                    let open_bracket = ctx
+                        .source_range(call_expr.span)
+                        .chars()
+                        .skip(member_expr.span().size() as usize)
+                        .position(|c| c == '(');
+
+                    if let Some(open_bracket) = open_bracket {
+                        #[allow(clippy::cast_possible_truncation)]
+                        fixer.insert_text_after_range(
+                            Span::new(
+                                0,
+                                call_expr.span.start
+                                    + member_expr.span().size()
+                                    + open_bracket as u32
+                                    + 1,
+                            ),
+                            r#"",""#,
+                        )
+                    } else {
+                        fixer.noop()
+                    }
+                },
+            );
         }
 
         // `[].join.call(foo)` and `Array.prototype.join.call(foo)`
@@ -74,10 +103,20 @@ impl Rule for RequireArrayJoinSeparator {
                 && !call_expr.arguments.iter().any(oxc_ast::ast::Argument::is_spread)
                 && is_array_prototype_property(member_expr_obj, "join")
             {
-                ctx.diagnostic(RequireArrayJoinSeparatorDiagnostic(Span::new(
-                    member_expr.span().end,
-                    call_expr.span.end,
-                )));
+                ctx.diagnostic_with_fix(
+                    require_array_join_separator_diagnostic(Span::new(
+                        member_expr.span().end,
+                        call_expr.span.end,
+                    )),
+                    |fixer| {
+                        // after the end of the first argument, insert `","`
+                        let first_arg = call_expr.arguments.first().unwrap();
+                        fixer.insert_text_after_range(
+                            Span::new(first_arg.span().end, first_arg.span().end),
+                            r#", ",""#,
+                        )
+                    },
+                );
             }
         }
     }
@@ -88,14 +127,14 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
-        ("foo.join(\",\")", None),
+        (r#"foo.join(",")"#, None),
         (r"join()", None),
         (r"foo.join(...[])", None),
         (r"foo.join?.()", None),
         (r"foo?.join?.()", None),
         (r"foo[join]()", None),
-        ("foo[\"join\"]()", None),
-        ("[].join.call(foo, \",\")", None),
+        (r#"foo["join"]()"#, None),
+        (r#"[].join.call(foo, ",")"#, None),
         (r"[].join.call()", None),
         (r"[].join.call(...[foo])", None),
         (r"[].join?.call(foo)", None),
@@ -105,20 +144,20 @@ fn test() {
         (r"[,].join.call(foo)", None),
         (r"[].join.notCall(foo)", None),
         (r"[].notJoin.call(foo)", None),
-        ("Array.prototype.join.call(foo, \"\")", None),
+        (r#"Array.prototype.join.call(foo, "")"#, None),
         (r"Array.prototype.join.call()", None),
         (r"Array.prototype.join.call(...[foo])", None),
         (r"Array.prototype.join?.call(foo)", None),
         (r"Array.prototype?.join.call(foo)", None),
         (r"Array?.prototype.join.call(foo)", None),
-        ("Array.prototype.join[call](foo, \"\")", None),
+        (r#"Array.prototype.join[call](foo, "")"#, None),
         (r"Array.prototype[join].call(foo)", None),
         (r"Array[prototype].join.call(foo)", None),
         (r"Array.prototype.join.notCall(foo)", None),
         (r"Array.prototype.notJoin.call(foo)", None),
         (r"Array.notPrototype.join.call(foo)", None),
         (r"NotArray.prototype.join.call(foo)", None),
-        ("path.join(__dirname, \"./foo.js\")", None),
+        (r#"path.join(__dirname, "./foo.js")"#, None),
     ];
 
     let fail = vec![
@@ -131,5 +170,18 @@ fn test() {
         (r"foo?.join()", None),
     ];
 
-    Tester::new(RequireArrayJoinSeparator::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (r"foo.join()", r#"foo.join(",")"#),
+        (r"foo.join                 ()", r#"foo.join                 (",")"#),
+        (r"[].join.call(foo)", r#"[].join.call(foo, ",")"#),
+        (r"[].join.call(foo,)", r#"[].join.call(foo, ",",)"#),
+        (r"[].join.call(foo , );", r#"[].join.call(foo, "," , );"#),
+        (r"Array.prototype.join.call(foo)", r#"Array.prototype.join.call(foo, ",")"#),
+        (r"Array.prototype.join.call(foo, )", r#"Array.prototype.join.call(foo, ",", )"#),
+        (r"foo?.join()", r#"foo?.join(",")"#),
+    ];
+
+    Tester::new(RequireArrayJoinSeparator::NAME, RequireArrayJoinSeparator::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

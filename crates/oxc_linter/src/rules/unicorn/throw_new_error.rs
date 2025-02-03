@@ -3,11 +3,7 @@ use oxc_ast::{
     ast::{match_member_expression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use regex::Regex;
@@ -19,10 +15,11 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(throw-new-error): Require `new` when throwing an error.")]
-#[diagnostic(severity(warning), help("While it's possible to create a new error without using the `new` keyword, it's better to be explicit."))]
-struct ThrowNewErrorDiagnostic(#[label] pub Span);
+fn throw_new_error_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Require `new` when throwing an error.")
+        .with_help("While it's possible to create a new error without using the `new` keyword, it's better to be explicit.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ThrowNewError;
@@ -36,34 +33,42 @@ declare_oxc_lint!(
     ///
     /// While it's possible to create a new error without using the `new` keyword, it's better to be explicit.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Fail
     /// throw Error('🦄');
     /// throw TypeError('unicorn');
     /// throw lib.TypeError('unicorn');
+    /// ```
     ///
-    /// // Pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// throw new Error('🦄');
     /// throw new TypeError('unicorn');
     /// throw new lib.TypeError('unicorn');
-    ///
     /// ```
     ThrowNewError,
-    style
+    unicorn,
+    style,
+    fix
 );
 
 impl Rule for ThrowNewError {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
-        let Some(outermost_paren_node) = outermost_paren_parent(node, ctx) else { return };
+        let Some(outermost_paren_node) = outermost_paren_parent(node, ctx) else {
+            return;
+        };
 
         let AstKind::ThrowStatement(_) = outermost_paren(outermost_paren_node, ctx).kind() else {
             return;
         };
 
-        match call_expr.callee.without_parenthesized() {
+        match call_expr.callee.without_parentheses() {
             Expression::Identifier(v) => {
                 if !CUSTOM_ERROR_REGEX_PATTERN.is_match(&v.name) {
                     return;
@@ -83,7 +88,9 @@ impl Rule for ThrowNewError {
             _ => return,
         }
 
-        ctx.diagnostic(ThrowNewErrorDiagnostic(call_expr.span));
+        ctx.diagnostic_with_fix(throw_new_error_diagnostic(call_expr.span), |fixer| {
+            fixer.insert_text_before_range(call_expr.span, "new ")
+        });
     }
 }
 
@@ -141,5 +148,12 @@ fn test() {
         ("throw (( getGlobalThis().Error ))()", None),
     ];
 
-    Tester::new(ThrowNewError::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("throw Error()", "throw new Error()"),
+        ("throw (( getGlobalThis().Error ))()", "throw new (( getGlobalThis().Error ))()"),
+    ];
+
+    Tester::new(ThrowNewError::NAME, ThrowNewError::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

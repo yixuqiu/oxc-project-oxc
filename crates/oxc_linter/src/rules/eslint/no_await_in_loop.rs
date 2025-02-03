@@ -2,19 +2,15 @@ use oxc_ast::{
     ast::{Expression, Statement},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-await-in-loop): Unexpected `await` inside a loop.")]
-#[diagnostic(severity(warning))]
-struct NoAwaitInLoopDiagnostic(#[label] pub Span);
+fn no_await_in_loop_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected `await` inside a loop.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoAwaitInLoop;
@@ -22,7 +18,7 @@ pub struct NoAwaitInLoop;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// This rule disallows the use of await within loop bodies. (for, for-in, for-of, while, do-while).
+    /// This rule disallows the use of `await` within loop bodies. (for, for-in, for-of, while, do-while).
     ///
     /// ### Why is this bad?
     ///
@@ -30,18 +26,24 @@ declare_oxc_lint!(
     /// Instead, they are being run in series, which can lead to poorer performance.
     ///
     /// ### Example
-    /// Bad:
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// for (const user of users) {
-    ///   const userRecord = await getUserRecord(user);
+    /// async function bad() {
+    ///     for (const user of users) {
+    ///       const userRecord = await getUserRecord(user);
+    ///     }
     /// }
     /// ```
     ///
-    /// Good:
+    /// Examples of **correct** code for this rule:
     /// ```javascript
-    /// await Promise.all(users.map(user => getUserRecord(user)));
+    /// async function good() {
+    ///     await Promise.all(users.map(user => getUserRecord(user)));
+    /// }
     /// ```
     NoAwaitInLoop,
+    eslint,
     perf
 );
 
@@ -84,7 +86,7 @@ impl Rule for NoAwaitInLoop {
         }
 
         if is_in_loop {
-            ctx.diagnostic(NoAwaitInLoopDiagnostic(span));
+            ctx.diagnostic(no_await_in_loop_diagnostic(span));
         }
     }
 }
@@ -231,5 +233,5 @@ fn test() {
         "async function foo() { for await (var x of xs) { while (1) await f(x) } }",
     ];
 
-    Tester::new(NoAwaitInLoop::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoAwaitInLoop::NAME, NoAwaitInLoop::PLUGIN, pass, fail).test_and_snapshot();
 }

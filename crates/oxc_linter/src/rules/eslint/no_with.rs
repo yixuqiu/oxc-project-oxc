@@ -1,17 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-with): Unexpected use of `with` statement.")]
-#[diagnostic(severity(warning), help("Do not use the `with` statement."))]
-struct NoWithDiagnostic(#[label] pub Span);
+fn no_with_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected use of `with` statement.")
+        .with_help("Do not use the `with` statement.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoWith;
@@ -30,13 +28,14 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoWith,
+    eslint,
     correctness
 );
 
 impl Rule for NoWith {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::WithStatement(with_statement) = node.kind() {
-            ctx.diagnostic(NoWithDiagnostic(Span::new(
+            ctx.diagnostic(no_with_diagnostic(Span::new(
                 with_statement.span.start,
                 with_statement.span.start + 4,
             )));
@@ -52,5 +51,5 @@ fn test() {
 
     let fail = vec!["with(foo) { bar() }"];
 
-    Tester::new(NoWith::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoWith::NAME, NoWith::PLUGIN, pass, fail).test_and_snapshot();
 }

@@ -3,13 +3,10 @@ use oxc_ast::{
     ast::{Argument, Expression, Statement, VariableDeclarationKind},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::AstNode;
-use oxc_span::Span;
+use oxc_span::{CompactStr, Span};
 
 use crate::{
     context::LintContext,
@@ -20,14 +17,15 @@ use crate::{
     },
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(require-hook): Require setup and teardown code to be within a hook.")]
-#[diagnostic(severity(warning), help("This should be done within a hook"))]
-struct UseHook(#[label] pub Span);
+fn use_hook(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Require setup and teardown code to be within a hook.")
+        .with_help("This should be done within a hook")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireHookConfig {
-    allowed_function_calls: Vec<String>,
+    allowed_function_calls: Vec<CompactStr>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -146,6 +144,7 @@ declare_oxc_lint!(
     /// ```
     ///
     RequireHook,
+    jest,
     style
 );
 
@@ -155,9 +154,7 @@ impl Rule for RequireHook {
             .get(0)
             .and_then(|config| config.get("allowedFunctionCalls"))
             .and_then(serde_json::Value::as_array)
-            .map(|v| {
-                v.iter().filter_map(serde_json::Value::as_str).map(ToString::to_string).collect()
-            })
+            .map(|v| v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect())
             .unwrap_or_default();
 
         Self(Box::new(RequireHookConfig { allowed_function_calls }))
@@ -220,7 +217,7 @@ impl RequireHook {
                     !init_call.is_null_or_undefined()
                 })
             {
-                ctx.diagnostic(UseHook(var_decl.span));
+                ctx.diagnostic(use_hook(var_decl.span));
             }
         }
     }
@@ -232,14 +229,14 @@ impl RequireHook {
         ctx: &LintContext<'a>,
     ) {
         if let Expression::CallExpression(call_expr) = expr {
-            let name: String = get_node_name(&call_expr.callee);
+            let name = get_node_name(&call_expr.callee);
 
             if !(parse_jest_fn_call(call_expr, &PossibleJestNode { node, original: None }, ctx)
                 .is_some()
                 || name.starts_with("jest.")
                 || self.allowed_function_calls.contains(&name))
             {
-                ctx.diagnostic(UseHook(call_expr.span));
+                ctx.diagnostic(use_hook(call_expr.span));
             }
         }
     }
@@ -624,5 +621,7 @@ fn tests() {
         ),
     ];
 
-    Tester::new(RequireHook::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequireHook::NAME, RequireHook::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

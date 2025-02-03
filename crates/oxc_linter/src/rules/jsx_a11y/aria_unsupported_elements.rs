@@ -1,8 +1,6 @@
+use cow_utils::CowUtils;
 use oxc_ast::{ast::JSXAttributeItem, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use phf::phf_set;
@@ -17,45 +15,55 @@ use crate::{
 declare_oxc_lint! {
     /// ### What it does
     ///
-    /// Certain reserved DOM elements do not support ARIA roles, states and properties. This is often because they are not visible, for example `meta`, `html`, `script`, `style`. This rule enforces that these DOM elements do not contain the `role` and/or `aria-*` props.
+    /// Certain reserved DOM elements do not support ARIA roles, states and
+    /// properties. This is often because they are not visible, for example
+    /// `meta`, `html`, `script`, `style`. This rule enforces that these DOM
+    /// elements do not contain the `role` and/or `aria-*` props.
     ///
     /// ### Example
     ///
+    /// Examples of **incorrect** code for this rule:
     /// ```jsx
-    /// // Good
-    ///	<meta charset="UTF-8" />
-    ///
-    /// // Bad
     /// <meta charset="UTF-8" aria-hidden="false" />
     /// ```
     ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
+    ///	<meta charset="UTF-8" />
+    /// ```
+    ///
     AriaUnsupportedElements,
-    correctness
+    jsx_a11y,
+    correctness,
+    fix
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct AriaUnsupportedElements;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsx-a11y(aria-unsupported-elements): This element does not support ARIA roles, states and properties.")]
-#[diagnostic(severity(warning), help("Try removing the prop `{1}`."))]
-struct AriaUnsupportedElementsDiagnostic(#[label] pub Span, String);
+fn aria_unsupported_elements_diagnostic(span: Span, x1: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("This element does not support ARIA roles, states and properties.")
+        .with_help(format!("Try removing the prop `{x1}`."))
+        .with_label(span)
+}
 
 impl Rule for AriaUnsupportedElements {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::JSXOpeningElement(jsx_el) = node.kind() {
-            let Some(el_type) = get_element_type(ctx, jsx_el) else {
-                return;
-            };
+            let el_type = get_element_type(ctx, jsx_el);
             if RESERVED_HTML_TAG.contains(&el_type) {
                 for attr in &jsx_el.attributes {
                     let attr = match attr {
                         JSXAttributeItem::Attribute(attr) => attr,
                         JSXAttributeItem::SpreadAttribute(_) => continue,
                     };
-                    let attr_name = get_jsx_attribute_name(&attr.name).to_lowercase();
+                    let attr_name = get_jsx_attribute_name(&attr.name);
+                    let attr_name = attr_name.cow_to_ascii_lowercase();
                     if INVALID_ATTRIBUTES.contains(&attr_name) {
-                        ctx.diagnostic(AriaUnsupportedElementsDiagnostic(attr.span, attr_name));
+                        ctx.diagnostic_with_fix(
+                            aria_unsupported_elements_diagnostic(attr.span, &attr_name),
+                            |fixer| fixer.delete(&attr.span),
+                        );
                     }
                 }
             }
@@ -415,7 +423,16 @@ fn test() {
         (r#"<track aria-hidden aria-role="none" {...props} />"#, None),
     ];
 
-    Tester::new(AriaUnsupportedElements::NAME, pass, fail)
+    let fix = vec![
+        (r"<col role {...props} />", r"<col  {...props} />"),
+        (
+            r#"<meta aria-hidden aria-role="none" {...props} />"#,
+            r#"<meta  aria-role="none" {...props} />"#,
+        ),
+    ];
+
+    Tester::new(AriaUnsupportedElements::NAME, AriaUnsupportedElements::PLUGIN, pass, fail)
         .with_jsx_a11y_plugin(true)
+        .expect_fix(fix)
         .test_and_snapshot();
 }

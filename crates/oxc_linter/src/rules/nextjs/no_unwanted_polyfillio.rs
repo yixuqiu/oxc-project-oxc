@@ -1,25 +1,27 @@
+use cow_utils::CowUtils;
 use oxc_ast::{
-    ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXElementName},
+    ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::AstNode;
 use oxc_span::Span;
 use phf::{phf_set, Set};
 
-use crate::{context::LintContext, rule::Rule, utils::get_next_script_import_local_name};
+use crate::{
+    context::LintContext,
+    rule::Rule,
+    utils::{find_url_query_value, get_next_script_import_local_name},
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-unwanted-polyfillio): No duplicate polyfills from Polyfill.io are allowed. {0} already shipped with Next.js.")]
-#[diagnostic(
-    severity(warning),
-    help("See https://nextjs.org/docs/messages/no-unwanted-polyfillio")
-)]
-struct NoUnwantedPolyfillioDiagnostic(String, #[label] pub Span);
+fn no_unwanted_polyfillio_diagnostic(polyfill_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "No duplicate polyfills from Polyfill.io are allowed. {polyfill_name} already shipped with Next.js."
+    ))
+    .with_help("See https://nextjs.org/docs/messages/no-unwanted-polyfillio")
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnwantedPolyfillio;
@@ -38,10 +40,11 @@ declare_oxc_lint!(
     /// <script src='https://polyfill.io/v3/polyfill.min.js?features=WeakSet%2CPromise%2CPromise.prototype.finally%2Ces2015%2Ces5%2Ces6'></script>
     /// ```
     NoUnwantedPolyfillio,
+    nextjs,
     correctness
 );
 
-// Keep in sync with next.js polyfills file : https://github.com/vercel/next.js/blob/master/packages/next-polyfill-nomodule/src/index.js
+// Keep in sync with next.js polyfills file : https://github.com/vercel/next.js/blob/v15.0.2/packages/next-polyfill-nomodule/src/index.js
 const NEXT_POLYFILLED_FEATURES: Set<&'static str> = phf_set! {
     "Array.prototype.@@iterator",
     "Array.prototype.at",
@@ -110,66 +113,66 @@ const NEXT_POLYFILLED_FEATURES: Set<&'static str> = phf_set! {
 
 impl Rule for NoUnwantedPolyfillio {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        if let AstKind::JSXOpeningElement(jsx_el) = node.kind() {
-            let tag_name = if let JSXElementName::Identifier(ident) = &jsx_el.name {
-                &ident.name
-            } else {
+        let AstKind::JSXOpeningElement(jsx_el) = node.kind() else {
+            return;
+        };
+
+        let Some(tag_name) = jsx_el.name.get_identifier_name() else {
+            return;
+        };
+
+        if tag_name.as_str() != "script" {
+            let next_script_import_local_name = get_next_script_import_local_name(ctx);
+            if !matches!(next_script_import_local_name, Some(import) if tag_name == import) {
+                return;
+            }
+        }
+
+        if jsx_el.attributes.len() == 0 {
+            return;
+        }
+
+        let Some(JSXAttributeItem::Attribute(src)) = jsx_el.attributes.iter().find(|attr| {
+            matches!(
+                attr,
+                JSXAttributeItem::Attribute(jsx_attr)
+                    if matches!(
+                        &jsx_attr.name,
+                        JSXAttributeName::Identifier(id) if id.name.as_str() == "src"
+                    )
+            )
+        }) else {
+            return;
+        };
+
+        let Some(JSXAttributeValue::StringLiteral(src_value)) = &src.value else {
+            return;
+        };
+
+        if src_value.value.as_str().starts_with("https://cdn.polyfill.io/v2/")
+            || src_value.value.as_str().starts_with("https://polyfill.io/v3/")
+        {
+            let Some(features_value) = find_url_query_value(src_value.value.as_str(), "features")
+            else {
                 return;
             };
 
-            if tag_name.as_str() != "script" {
-                let next_script_import_local_name = get_next_script_import_local_name(ctx);
-                if !matches!(next_script_import_local_name, Some(import) if tag_name.as_str() == import.as_str())
-                {
-                    return;
-                }
-            }
+            // Replace URL encoded values
+            let features_value = features_value.cow_replace("%2C", ",");
 
-            if jsx_el.attributes.len() == 0 {
-                return;
-            }
-
-            let Some(JSXAttributeItem::Attribute(src)) = jsx_el.attributes.iter().find(|attr| {
-                matches!(
-                    attr,
-                    JSXAttributeItem::Attribute(jsx_attr)
-                        if matches!(
-                            &jsx_attr.name,
-                            JSXAttributeName::Identifier(id) if id.name.as_str() == "src"
-                        )
-                )
-            }) else {
-                return;
-            };
-
-            if let Some(JSXAttributeValue::StringLiteral(src_value)) = &src.value {
-                if src_value.value.as_str().starts_with("https://cdn.polyfill.io/v2/")
-                    || src_value.value.as_str().starts_with("https://polyfill.io/v3/")
-                {
-                    let Ok(url) = url::Url::parse(src_value.value.as_str()) else {
-                        return;
-                    };
-
-                    let Some((_, features_value)) =
-                        url.query_pairs().find(|(key, _)| key == "features")
-                    else {
-                        return;
-                    };
-                    let unwanted_features: Vec<&str> = features_value
-                        .split(',')
-                        .filter(|feature| NEXT_POLYFILLED_FEATURES.contains(feature))
-                        .collect();
-                    if !unwanted_features.is_empty() {
-                        ctx.diagnostic(NoUnwantedPolyfillioDiagnostic(
-                            format!(
-                                "{} {}",
-                                unwanted_features.join(", "),
-                                if unwanted_features.len() > 1 { "are" } else { "is" }
-                            ),
-                            src.span,
-                        ));
-                    }
-                }
+            let unwanted_features: Vec<&str> = features_value
+                .split(',')
+                .filter(|feature| NEXT_POLYFILLED_FEATURES.contains(feature))
+                .collect();
+            if !unwanted_features.is_empty() {
+                ctx.diagnostic(no_unwanted_polyfillio_diagnostic(
+                    &format!(
+                        "{} {}",
+                        unwanted_features.join(", "),
+                        if unwanted_features.len() > 1 { "are" } else { "is" }
+                    ),
+                    src.span,
+                ));
             }
         }
     }
@@ -265,5 +268,6 @@ fn test() {
                   }",
     ];
 
-    Tester::new(NoUnwantedPolyfillio::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnwantedPolyfillio::NAME, NoUnwantedPolyfillio::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

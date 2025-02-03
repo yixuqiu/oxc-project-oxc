@@ -1,30 +1,21 @@
+use oxc_ast::AstKind;
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_macros::declare_oxc_lint;
+use oxc_span::Span;
+use rustc_hash::FxHashMap;
+
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{
-        collect_possible_jest_call_node, is_type_of_jest_fn_call, JestFnKind, JestGeneralFnKind,
-        PossibleJestNode,
-    },
+    utils::{is_type_of_jest_fn_call, JestFnKind, JestGeneralFnKind, PossibleJestNode},
 };
 
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
-use rustc_hash::{FxHashMap, FxHasher};
-use std::{collections::HashMap, hash::BuildHasherDefault};
+fn restricted_jest_method(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Use of `{x0}` is not allowed")).with_label(span1)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoRestrictedJestMethodsDiagnostic {
-    #[error("eslint-plugin-jest(no-restricted-jest-methods): Disallow specific `jest.` methods")]
-    #[diagnostic(severity(warning), help("Use of `{0:?}` is disallowed"))]
-    RestrictedJestMethod(String, #[label] Span),
-    #[error("eslint-plugin-jest(no-restricted-jest-methods): Disallow specific `jest.` methods")]
-    #[diagnostic(severity(warning), help("{0:?}"))]
-    RestrictedJestMethodWithMessage(String, #[label] Span),
+fn restricted_jest_method_with_message(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(x0.to_string()).with_label(span1)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -46,7 +37,7 @@ impl std::ops::Deref for NoRestrictedJestMethods {
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Restrict the use of specific `jest` methods.
+    /// Restrict the use of specific `jest` and `vi` methods.
     ///
     /// ### Example
     /// ```javascript
@@ -64,8 +55,9 @@ declare_oxc_lint!(
     ///
     ///   // ...
     /// });
-    ///
+    /// ```
     NoRestrictedJestMethods,
+    jest,
     style,
 );
 
@@ -82,10 +74,12 @@ impl Rule for NoRestrictedJestMethods {
         }))
     }
 
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            self.run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        self.run(jest_node, ctx);
     }
 }
 
@@ -108,7 +102,10 @@ impl NoRestrictedJestMethods {
             call_expr,
             possible_jest_node,
             ctx,
-            &[JestFnKind::General(JestGeneralFnKind::Jest)],
+            &[
+                JestFnKind::General(JestGeneralFnKind::Jest),
+                JestFnKind::General(JestGeneralFnKind::Vitest),
+            ],
         ) {
             return;
         }
@@ -126,23 +123,13 @@ impl NoRestrictedJestMethods {
         if self.contains(property_name) {
             self.get_message(property_name).map_or_else(
                 || {
-                    ctx.diagnostic(NoRestrictedJestMethodsDiagnostic::RestrictedJestMethod(
-                        property_name.to_string(),
-                        span,
-                    ));
+                    ctx.diagnostic(restricted_jest_method(property_name, span));
                 },
                 |message| {
                     if message.trim() == "" {
-                        ctx.diagnostic(NoRestrictedJestMethodsDiagnostic::RestrictedJestMethod(
-                            property_name.to_string(),
-                            span,
-                        ));
+                        ctx.diagnostic(restricted_jest_method(property_name, span));
                     } else {
-                        ctx.diagnostic(
-                            NoRestrictedJestMethodsDiagnostic::RestrictedJestMethodWithMessage(
-                                message, span,
-                            ),
-                        );
+                        ctx.diagnostic(restricted_jest_method_with_message(&message, span));
                     }
                 },
             );
@@ -152,7 +139,7 @@ impl NoRestrictedJestMethods {
     #[allow(clippy::unnecessary_wraps)]
     pub fn compile_restricted_jest_methods(
         matchers: &serde_json::Map<String, serde_json::Value>,
-    ) -> Option<HashMap<String, String, BuildHasherDefault<FxHasher>>> {
+    ) -> Option<FxHashMap<String, String>> {
         Some(
             matchers
                 .iter()
@@ -168,7 +155,7 @@ impl NoRestrictedJestMethods {
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         ("jest", None),
         ("jest()", None),
         ("jest.mock()", None),
@@ -184,7 +171,7 @@ fn test() {
         ),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         ("jest.fn()", Some(serde_json::json!([{ "fn": null }]))),
         ("jest[\"fn\"]()", Some(serde_json::json!([{ "fn": null }]))),
         ("jest.mock()", Some(serde_json::json!([{ "mock": "Do not use mocks" }]))),
@@ -198,7 +185,39 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoRestrictedJestMethods::NAME, pass, fail)
+    let pass_vitest = vec![
+        ("vi", None),
+        ("vi()", None),
+        ("vi.mock()", None),
+        ("expect(a).rejects;", None),
+        ("expect(a);", None),
+        (
+            "
+			     import { vi } from 'vitest';
+			     vi;
+			    ",
+            None,
+        ), // { "parserOptions": { "sourceType": "module" } }
+    ];
+
+    let fail_vitest = vec![
+        ("vi.fn()", Some(serde_json::json!([{ "fn": null }]))),
+        ("vi.mock()", Some(serde_json::json!([{ "mock": "Do not use mocks" }]))),
+        (
+            "
+			     import { vi } from 'vitest';
+			     vi.advanceTimersByTime();
+			    ",
+            Some(serde_json::json!([{ "advanceTimersByTime": null }])),
+        ), // { "parserOptions": { "sourceType": "module" } },
+        (r#"vi["fn"]()"#, Some(serde_json::json!([{ "fn": null }]))),
+    ];
+
+    pass.extend(pass_vitest);
+    fail.extend(fail_vitest);
+
+    Tester::new(NoRestrictedJestMethods::NAME, NoRestrictedJestMethods::PLUGIN, pass, fail)
         .with_jest_plugin(true)
+        .with_vitest_plugin(true)
         .test_and_snapshot();
 }

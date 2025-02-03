@@ -1,16 +1,14 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-irregular-whitespace): Unexpected irregular whitespace")]
-#[diagnostic(severity(warning), help("Try to remove the irregular whitespace"))]
-struct NoIrregularWhitespaceDiagnostic(#[label] pub Span);
+fn no_irregular_whitespace_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected irregular whitespace")
+        .with_help("Try to remove the irregular whitespace")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoIrregularWhitespace;
@@ -30,14 +28,15 @@ declare_oxc_lint!(
     /// }
     /// ```
     NoIrregularWhitespace,
+    eslint,
     correctness
 );
 
 impl Rule for NoIrregularWhitespace {
     fn run_once(&self, ctx: &LintContext) {
-        let irregular_whitespaces = ctx.semantic().trivias().irregular_whitespaces();
+        let irregular_whitespaces = ctx.semantic().irregular_whitespaces();
         for irregular_whitespace in irregular_whitespaces {
-            ctx.diagnostic(NoIrregularWhitespaceDiagnostic(*irregular_whitespace));
+            ctx.diagnostic(no_irregular_whitespace_diagnostic(*irregular_whitespace));
         }
     }
 }
@@ -407,5 +406,6 @@ fn test() {
         // (r"<div>　</div>;", None),
     ];
 
-    Tester::new(NoIrregularWhitespace::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoIrregularWhitespace::NAME, NoIrregularWhitespace::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

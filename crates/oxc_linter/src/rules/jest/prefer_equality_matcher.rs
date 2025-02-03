@@ -1,27 +1,23 @@
-use crate::{
-    context::LintContext,
-    rule::Rule,
-    utils::{collect_possible_jest_call_node, parse_expect_jest_fn_call, PossibleJestNode},
-};
-
 use oxc_ast::{
     ast::{Argument, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::BinaryOperator;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-jest(prefer-equality-matcher): Suggest using the built-in equality matchers."
-)]
-#[diagnostic(severity(warning), help("Prefer using one of the equality matchers instead"))]
-struct UseEqualityMatcherDiagnostic(#[label] Span);
+use crate::{
+    context::LintContext,
+    rule::Rule,
+    utils::{parse_expect_jest_fn_call, PossibleJestNode},
+};
+
+fn use_equality_matcher_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using the built-in equality matchers.")
+        .with_help("Prefer using one of the equality matchers instead")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferEqualityMatcher;
@@ -45,14 +41,17 @@ declare_oxc_lint!(
     /// expect(myObj).toStrictEqual(thatObj);
     /// ```
     PreferEqualityMatcher,
+    jest,
     style,
 );
 
 impl Rule for PreferEqualityMatcher {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -92,7 +91,7 @@ impl PreferEqualityMatcher {
             return;
         };
 
-        ctx.diagnostic(UseEqualityMatcherDiagnostic(matcher.span));
+        ctx.diagnostic(use_equality_matcher_diagnostic(matcher.span));
     }
 }
 
@@ -100,7 +99,7 @@ impl PreferEqualityMatcher {
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         ("expect.hasAssertions", None),
         ("expect.hasAssertions()", None),
         ("expect.assertions(1)", None),
@@ -110,7 +109,7 @@ fn test() {
         ("expect(a == b).toBe(true)", None),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         ("expect(a !== b).toBe(true)", None),
         ("expect(a !== b).toBe(false)", None),
         ("expect(a !== b).resolves.toBe(true)", None),
@@ -121,5 +120,49 @@ fn test() {
         ("expect(a !== b).resolves.not.toBe(false)", None),
     ];
 
-    Tester::new(PreferEqualityMatcher::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    let pass_vitest = vec![
+        ("expect.hasAssertions", None),
+        ("expect.hasAssertions()", None),
+        ("expect.assertions(1)", None),
+        ("expect(true).toBe(...true)", None),
+        ("expect(a == 1).toBe(true)", None),
+        ("expect(1 == a).toBe(true)", None),
+        ("expect(a == b).toBe(true)", None),
+        ("expect.hasAssertions", None),
+        ("expect.hasAssertions()", None),
+        ("expect.assertions(1)", None),
+        ("expect(true).toBe(...true)", None),
+        ("expect(a != 1).toBe(true)", None),
+        ("expect(1 != a).toBe(true)", None),
+        ("expect(a != b).toBe(true)", None),
+    ];
+
+    let fail_vitest = vec![
+        ("expect(a === b).toBe(true);", None),
+        ("expect(a === b,).toBe(true,);", None), // { "parserOptions": { "ecmaVersion": 2017 } },
+        ("expect(a === b).toBe(false);", None),
+        ("expect(a === b).resolves.toBe(true);", None),
+        ("expect(a === b).resolves.toBe(false);", None),
+        ("expect(a === b).not.toBe(true);", None),
+        ("expect(a === b).not.toBe(false);", None),
+        ("expect(a === b).resolves.not.toBe(true);", None),
+        ("expect(a === b).resolves.not.toBe(false);", None),
+        (r#"expect(a === b)["resolves"].not.toBe(false);"#, None),
+        (r#"expect(a === b)["resolves"]["not"]["toBe"](false);"#, None),
+        ("expect(a !== b).toBe(true);", None),
+        ("expect(a !== b).toBe(false);", None),
+        ("expect(a !== b).resolves.toBe(true);", None),
+        ("expect(a !== b).resolves.toBe(false);", None),
+        ("expect(a !== b).not.toBe(true);", None),
+        ("expect(a !== b).not.toBe(false);", None),
+        ("expect(a !== b).resolves.not.toBe(true);", None),
+        ("expect(a !== b).resolves.not.toBe(false);", None),
+    ];
+
+    pass.extend(pass_vitest);
+    fail.extend(fail_vitest);
+
+    Tester::new(PreferEqualityMatcher::NAME, PreferEqualityMatcher::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

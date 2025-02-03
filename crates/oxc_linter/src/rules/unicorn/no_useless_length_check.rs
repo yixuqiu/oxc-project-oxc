@@ -1,36 +1,30 @@
-use itertools::concat;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
-use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 use std::fmt::Debug;
 
 use oxc_ast::{
     ast::{Expression, LogicalExpression},
     AstKind,
 };
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_macros::declare_oxc_lint;
+use oxc_span::Span;
+use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoUselessLengthCheckDiagnostic {
-    #[error("eslint-plugin-unicorn(no-useless-length-check)")]
-    #[diagnostic(
-        severity(warning),
-        help(
-            "The non-empty check is useless as `Array#some()` returns `false` for an empty array."
+fn some(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Found a useless array length check")
+        .with_help(
+            "The non-empty check is useless as `Array#some()` returns `false` for an empty array.",
         )
-    )]
-    Some(#[label] Span),
-    #[error("eslint-plugin-unicorn(no-useless-length-check)")]
-    #[diagnostic(
-        severity(warning),
-        help("The empty check is useless as `Array#every()` returns `true` for an empty array.")
-    )]
-    Every(#[label] Span),
+        .with_label(span)
+}
+
+fn every(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Found a useless array length check")
+        .with_help(
+            "The empty check is useless as `Array#every()` returns `true` for an empty array.",
+        )
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -38,23 +32,28 @@ pub struct NoUselessLengthCheck;
 
 declare_oxc_lint!(
     /// ### What it does
-    /// It checks for an unnecessary array length check in a logical expression
+    ///
+    /// It checks for an unnecessary array length check in a logical expression.
+    ///
     /// The cases are:
-    ///  array.length === 0 || array.every(Boolean) (array.every returns true if array is has elements)
-    ///  array.length > 0 && array.some(Boolean) (array.some returns false if array is empty)
+    /// - `array.length === 0 || array.every(Boolean)` (`array.every` returns `true` if array is has elements)
+    /// - `array.length > 0 && array.some(Boolean)` (`array.some` returns `false` if array is empty)
     ///
     /// ### Why is this bad?
-    /// An extra unnecessary length check is done
+    ///
+    /// An extra unnecessary length check is done.
     ///
     /// ### Example
-    /// ```javascript
-    /// if(array.length === 0 || array.every(Boolean)){
-    ///    do something!
-    /// }
     ///
+    /// ```javascript
+    /// if (array.length === 0 || array.every(Boolean)) {
+    ///    // do something!
+    /// }
     /// ```
     NoUselessLengthCheck,
-    correctness
+    unicorn,
+    correctness,
+    pending
 );
 
 struct ConditionDTO<T: ToString> {
@@ -66,7 +65,7 @@ fn is_useless_check<'a>(
     left: &'a Expression<'a>,
     right: &'a Expression<'a>,
     operator: LogicalOperator,
-) -> Option<NoUselessLengthCheckDiagnostic> {
+) -> Option<OxcDiagnostic> {
     let every_condition = ConditionDTO {
         property_name: "every",
         binary_operators: vec![BinaryOperator::StrictEquality],
@@ -87,7 +86,7 @@ fn is_useless_check<'a>(
     let mut binary_expression_span: Option<Span> = None;
     let mut call_expression_span: Option<Span> = None;
 
-    let l = match left.without_parenthesized() {
+    let l = match left.without_parentheses() {
         Expression::BinaryExpression(expr) => {
             let left_expr = expr.left.get_inner_expression().as_member_expression()?;
             array_name = left_expr.object().get_identifier_reference()?.name.as_str();
@@ -111,7 +110,7 @@ fn is_useless_check<'a>(
         _ => false,
     };
 
-    let r = match right.without_parenthesized() {
+    let r = match right.without_parentheses() {
         Expression::BinaryExpression(expr) => {
             let left_expr = expr.left.get_inner_expression().as_member_expression()?;
             let ident_name = left_expr.object().get_identifier_reference()?.name.as_str();
@@ -144,9 +143,9 @@ fn is_useless_check<'a>(
 
     if l && r {
         Some(if active_condition.property_name == "every" {
-            NoUselessLengthCheckDiagnostic::Every(binary_expression_span?)
+            every(binary_expression_span?)
         } else {
-            NoUselessLengthCheckDiagnostic::Some(binary_expression_span?)
+            some(binary_expression_span?)
         })
     } else {
         None
@@ -159,11 +158,10 @@ impl Rule for NoUselessLengthCheck {
             if ![LogicalOperator::And, LogicalOperator::Or].contains(&log_expr.operator) {
                 return;
             }
-            let flat_expr = flat_logical_expression(log_expr);
-            for i in 0..flat_expr.len() - 1 {
-                if let Some(diag) =
-                    is_useless_check(flat_expr[i], flat_expr[i + 1], log_expr.operator)
-                {
+            let mut flat_exprs = Vec::new();
+            make_flat_logical_expression(log_expr, &mut flat_exprs);
+            for window in flat_exprs.windows(2) {
+                if let Some(diag) = is_useless_check(window[0], window[1], log_expr.operator) {
                     ctx.diagnostic(diag);
                 }
             }
@@ -171,30 +169,31 @@ impl Rule for NoUselessLengthCheck {
     }
 }
 
-fn flat_logical_expression<'a>(node: &'a LogicalExpression<'a>) -> Vec<&'a Expression<'a>> {
-    let left = match &node.left.without_parenthesized() {
+fn make_flat_logical_expression<'a>(
+    node: &'a LogicalExpression<'a>,
+    result: &mut Vec<&'a Expression<'a>>,
+) {
+    match &node.left.without_parentheses() {
         Expression::LogicalExpression(le) => {
             if le.operator == node.operator {
-                flat_logical_expression(le)
+                make_flat_logical_expression(le, result);
             } else {
-                vec![&node.left]
+                result.push(&node.left);
             }
         }
-        _ => vec![&node.left],
+        _ => result.push(&node.left),
     };
 
-    let right = match &node.right.without_parenthesized() {
+    match &node.right.without_parentheses() {
         Expression::LogicalExpression(le) => {
             if le.operator == node.operator {
-                flat_logical_expression(le)
+                make_flat_logical_expression(le, result);
             } else {
-                vec![&node.right]
+                result.push(&node.right);
             }
         }
-        _ => vec![&node.right],
+        _ => result.push(&node.right),
     };
-
-    concat(vec![left, right])
 }
 
 #[test]
@@ -288,5 +287,6 @@ fn test() {
         "array.length === 0 || array.every(Boolean) || array.length === 0",
     ];
 
-    Tester::new(NoUselessLengthCheck::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUselessLengthCheck::NAME, NoUselessLengthCheck::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -1,30 +1,22 @@
 use lazy_static::lazy_static;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use regex::{Captures, Regex};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoNonoctalDecimalEscapeDiagnostic {
-    #[error("eslint(no-nonoctal-decimal-escape): Don't use '{0}' escape sequence.")]
-    #[diagnostic(
-        severity(warning),
-        help("Replace '{0}' with '{1}'. This maintains the current functionality.")
-    )]
-    Replacement(String, String, #[label] Span),
+fn replacement(escape_sequence: &str, replacement: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Don't use '{escape_sequence}' escape sequence."))
+        .with_help(format!("Replace '{escape_sequence}' with '{replacement}'. This maintains the current functionality."))
+        .with_label(span)
+}
 
-    #[error("eslint(no-nonoctal-decimal-escape): Don't use '{0}' escape sequence.")]
-    #[diagnostic(
-        severity(warning),
-        help("Replace '{0}' with '{1}' to include the actual backslash character.")
-    )]
-    EscapeBackslash(String, String, #[label] Span),
+fn escape_backslash(escape_sequence: &str, replacement: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Don't use '{escape_sequence}' escape sequence."))
+        .with_help(format!("Replace '{escape_sequence}' with '{replacement}' to include the actual backslash character."))
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -47,7 +39,9 @@ declare_oxc_lint!(
     /// "\\9"
     /// ```
     NoNonoctalDecimalEscape,
-    correctness
+    eslint,
+    correctness,
+    pending
 );
 
 impl Rule for NoNonoctalDecimalEscape {
@@ -115,28 +109,24 @@ fn check_string(ctx: &LintContext<'_>, string: &str) {
 
         if let Some(prev_match) = previous_escape {
             if prev_match.as_str().eq("\\0") {
-                ctx.diagnostic(NoNonoctalDecimalEscapeDiagnostic::Replacement(
-                    prev_match.as_str().to_string() + decimal_escape_str,
-                    "\\u00008".to_string(),
+                ctx.diagnostic(replacement(
+                    &(prev_match.as_str().to_string() + decimal_escape_str),
+                    "\\u00008",
                     Span::new(prev_match.start() as u32, decimal_escape_span.end),
                 ));
-                ctx.diagnostic(NoNonoctalDecimalEscapeDiagnostic::Replacement(
-                    decimal_escape_str.to_string(),
-                    "\\u0038".to_string(),
-                    decimal_escape_span,
-                ));
+                ctx.diagnostic(replacement(decimal_escape_str, "\\u0038", decimal_escape_span));
             }
         } else {
-            ctx.diagnostic(NoNonoctalDecimalEscapeDiagnostic::Replacement(
-                decimal_escape_str.to_string(),
-                decimal_escape_str[1..].to_string(),
+            ctx.diagnostic(replacement(
+                decimal_escape_str,
+                &decimal_escape_str[1..],
                 decimal_escape_span,
             ));
         }
 
-        ctx.diagnostic(NoNonoctalDecimalEscapeDiagnostic::EscapeBackslash(
-            decimal_escape_str.to_string(),
-            format!("\\{decimal_escape_str}"),
+        ctx.diagnostic(escape_backslash(
+            decimal_escape_str,
+            &format!("\\{decimal_escape_str}"),
             decimal_escape_span,
         ));
 
@@ -238,5 +228,6 @@ fn test() {
         r"'\0\\n\8'",
     ];
 
-    Tester::new(NoNonoctalDecimalEscape::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoNonoctalDecimalEscape::NAME, NoNonoctalDecimalEscape::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

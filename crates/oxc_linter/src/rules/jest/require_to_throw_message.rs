@@ -1,21 +1,19 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{collect_possible_jest_call_node, parse_expect_jest_fn_call, PossibleJestNode},
+    utils::{parse_expect_jest_fn_call, PossibleJestNode},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(require-to-throw-message): Require a message for {0:?}.")]
-#[diagnostic(severity(warning), help("Add an error message to {0:?}"))]
-struct RequireToThrowMessageDiagnostic(pub String, #[label] pub Span);
+fn require_to_throw_message_diagnostic(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Require a message for {x0:?}."))
+        .with_help(format!("Add an error message to {x0:?}"))
+        .with_label(span1)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireToThrowMessage;
@@ -44,14 +42,17 @@ declare_oxc_lint!(
     /// ```
     ///
     RequireToThrowMessage,
+    jest,
     correctness
 );
 
 impl Rule for RequireToThrowMessage {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -81,7 +82,7 @@ impl RequireToThrowMessage {
             && (matcher_name == "toThrow" || matcher_name == "toThrowError")
             && !has_not
         {
-            ctx.diagnostic(RequireToThrowMessageDiagnostic(matcher_name.to_string(), matcher.span));
+            ctx.diagnostic(require_to_throw_message_diagnostic(&matcher_name, matcher.span));
         }
     }
 }
@@ -89,6 +90,8 @@ impl RequireToThrowMessage {
 #[test]
 fn test() {
     use crate::tester::Tester;
+
+    // Note: Both Jest and Vitest share the same unit tests
 
     let pass = vec![
         // String
@@ -179,5 +182,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(RequireToThrowMessage::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequireToThrowMessage::NAME, RequireToThrowMessage::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

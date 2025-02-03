@@ -1,22 +1,24 @@
-// Silence erroneous warnings from Rust Analyser for `#[derive(Tsify)]`
-#![allow(non_snake_case)]
 #![allow(clippy::needless_pass_by_value)]
 
+use oxc::{allocator::Allocator, parser::Parser, span::SourceType};
 use serde::{Deserialize, Serialize};
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-use oxc::{allocator::Allocator, parser::Parser, span::SourceType};
+#[wasm_bindgen::prelude::wasm_bindgen(typescript_custom_section)]
+const TS_APPEND_CONTENT: &'static str = r#"
+import type { Program } from "@oxc-project/types";
+export * from "@oxc-project/types";
+"#;
 
 #[derive(Debug, Default, Clone, Deserialize, Tsify)]
 #[tsify(from_wasm_abi)]
+#[serde(rename_all = "camelCase")]
 pub struct ParserOptions {
-    #[serde(rename = "sourceType")]
     #[tsify(optional, type = "\"script\" | \"module\"")]
     pub source_type: Option<String>,
 
     /// "module" and "jsx" will be inferred from `sourceFilename`.
-    #[serde(rename = "sourceFilename")]
     #[tsify(optional)]
     pub source_filename: Option<String>,
 }
@@ -82,13 +84,14 @@ pub fn parse_sync(
         ret.errors
             .iter()
             .flat_map(|error| {
-                let Some(labels) = error.labels() else { return vec![] };
+                let Some(labels) = &error.labels else { return vec![] };
                 labels
+                    .iter()
                     .map(|label| {
                         Diagnostic {
                             start: label.offset(),
                             end: label.offset() + label.len(),
-                            severity: format!("{:?}", error.severity().unwrap_or_default()),
+                            severity: "Error".to_string(),
                             message: format!("{error}"),
                         }
                         .serialize(&serializer)

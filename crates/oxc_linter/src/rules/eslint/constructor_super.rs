@@ -1,19 +1,15 @@
-// use oxc_diagnostics::{
-//     miette::{self, Diagnostic},
-//     thiserror::Error,
-// };
 use oxc_macros::declare_oxc_lint;
-// use oxc_span::Span;
 
+// use oxc_span::Span;
 use crate::{context::LintContext, rule::Rule, AstNode};
 
 // #[derive(Debug, Error, Diagnostic)]
-// #[error("eslint(constructor-super): Expected to call 'super()'.")]
+// #[error("Expected to call 'super()'.")]
 // #[diagnostic(severity(warning), help("Ensure 'super()' is called from constructor"))]
 // struct ConstructorSuperDiagnostic(#[label] pub Span);
 
 // #[derive(Debug, Error, Diagnostic)]
-// #[error("eslint(constructor-super): Unexpected 'super()' because 'super' is not a constructor.")]
+// #[error("Unexpected 'super()' because 'super' is not a constructor.")]
 // #[diagnostic(severity(warning), help("Do not call 'super()' from constructor."))]
 // struct SuperNotConstructorDiagnostic(
 //     #[label("unexpected 'super()'")] pub Span,
@@ -37,6 +33,7 @@ declare_oxc_lint!(
     /// }
     /// ```
     ConstructorSuper,
+    eslint,
     nursery // This rule should be implemented with CFG, the current implementation has a lot of
             // false positives.
 );
@@ -75,5 +72,5 @@ fn test() {
         // ("class A extends 'test' { constructor() { super(); } }", None),
     ];
 
-    Tester::new(ConstructorSuper::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ConstructorSuper::NAME, ConstructorSuper::PLUGIN, pass, fail).test_and_snapshot();
 }

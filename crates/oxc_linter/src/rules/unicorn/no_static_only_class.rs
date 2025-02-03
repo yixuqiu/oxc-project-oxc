@@ -1,22 +1,14 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(no-static-only-class): Disallow classes that only have static members."
-)]
-#[diagnostic(
-    severity(warning),
-    help("A class with only static members could just be an object instead.")
-)]
-struct NoStaticOnlyClassDiagnostic(#[label] pub Span);
+fn no_static_only_class_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use an object instead of a class with only static members.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoStaticOnlyClass;
@@ -30,28 +22,46 @@ declare_oxc_lint!(
     ///
     /// A class with only static members could just be an object instead.
     ///
-    ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// class A {
     ///     static a() {}
     /// }
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// class A {
     ///     static a() {}
     ///
     ///     constructor() {}
     /// }
     /// ```
+    /// ```javascript
+    /// const X = {
+    ///     foo: false,
+    ///     bar() {}
+    /// };
+    /// ```
+    /// ```javascript
+    /// class X {
+    ///     static #foo = false; // private field
+    ///     static bar() {}
+    /// }
+    /// ```
     NoStaticOnlyClass,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for NoStaticOnlyClass {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::Class(class) = node.kind() else { return };
+        let AstKind::Class(class) = node.kind() else {
+            return;
+        };
 
         if class.super_class.is_some() {
             return;
@@ -90,7 +100,7 @@ impl Rule for NoStaticOnlyClass {
             return;
         }
 
-        ctx.diagnostic(NoStaticOnlyClassDiagnostic(class.span));
+        ctx.diagnostic(no_static_only_class_diagnostic(class.span));
     }
 }
 
@@ -142,5 +152,5 @@ fn test() {
         r"class A { static a() {} }",
     ];
 
-    Tester::new(NoStaticOnlyClass::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoStaticOnlyClass::NAME, NoStaticOnlyClass::PLUGIN, pass, fail).test_and_snapshot();
 }

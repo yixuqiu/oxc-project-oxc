@@ -1,17 +1,20 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-blob-reading-methods): Prefer `Blob#{1}()` over `FileReader#{2}(blob)`.")]
-#[diagnostic(severity(warning))]
-struct PreferBlobReadingMethodsDiagnostic(#[label] pub Span, pub &'static str, pub &'static str);
+fn prefer_blob_reading_methods_diagnostic(
+    span: Span,
+    good_method: &str,
+    bad_method: &str,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "Prefer `Blob#{good_method}()` over `FileReader#{bad_method}(blob)`."
+    ))
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferBlobReadingMethods;
@@ -27,30 +30,38 @@ declare_oxc_lint!(
     ///
     /// ### Example
     /// ```javascript
-    /// // bad
-    /// const arrayBuffer = await new Promise((resolve, reject) => {
-    /// 	const fileReader = new FileReader();
-    /// 	fileReader.addEventListener('load', () => {
-    /// 		resolve(fileReader.result);
-    /// 	});
-    /// 	fileReader.addEventListener('error', () => {
-    /// 		reject(fileReader.error);
-    /// 	});
-    /// 	fileReader.readAsArrayBuffer(blob);
-    /// });
+    /// async function bad() {
+    ///     const arrayBuffer = await new Promise((resolve, reject) => {
+    ///         const fileReader = new FileReader();
+    ///         fileReader.addEventListener('load', () => {
+    ///             resolve(fileReader.result);
+    ///         });
+    ///         fileReader.addEventListener('error', () => {
+    ///             reject(fileReader.error);
+    ///         });
+    ///         fileReader.readAsArrayBuffer(blob);
+    ///     });
+    /// }
     ///
-    /// // good
-    /// const arrayBuffer = await blob.arrayBuffer();
+    /// async function good() {
+    ///     const arrayBuffer = await blob.arrayBuffer();
+    /// }
     /// ```
     PreferBlobReadingMethods,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for PreferBlobReadingMethods {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
-        let Some(member_expr) = call_expr.callee.as_member_expression() else { return };
+        let Some(member_expr) = call_expr.callee.as_member_expression() else {
+            return;
+        };
 
         if member_expr.is_computed()
             || member_expr.optional()
@@ -66,7 +77,7 @@ impl Rule for PreferBlobReadingMethods {
             _ => return,
         };
 
-        ctx.diagnostic(PreferBlobReadingMethodsDiagnostic(span, replacement, current));
+        ctx.diagnostic(prefer_blob_reading_methods_diagnostic(span, replacement, current));
     }
 }
 
@@ -86,5 +97,6 @@ fn test() {
 
     let fail = vec![r"fileReader.readAsArrayBuffer(blob)", r"fileReader.readAsText(blob)"];
 
-    Tester::new(PreferBlobReadingMethods::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferBlobReadingMethods::NAME, PreferBlobReadingMethods::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

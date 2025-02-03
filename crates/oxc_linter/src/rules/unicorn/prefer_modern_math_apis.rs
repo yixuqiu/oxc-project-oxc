@@ -2,35 +2,26 @@ use oxc_ast::{
     ast::{Argument, BinaryExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::BinaryOperator;
 
 use crate::{
-    ast_util::is_method_call, context::LintContext, rule::Rule, utils::is_same_reference, AstNode,
+    ast_util::is_method_call, context::LintContext, rule::Rule, utils::is_same_expression, AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferModernMathApisDiagnostic {
-    #[error(
-        "eslint-plugin-unicorn(prefer-modern-math-apis): Prefer `Math.abs(x)` over alternatives"
-    )]
-    #[diagnostic(severity(warning))]
-    PreferMathAbs(#[label] Span),
+fn prefer_math_abs(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer `Math.abs(x)` over alternatives").with_label(span)
+}
 
-    #[error(
-        "eslint-plugin-unicorn(prefer-modern-math-apis): Prefer `Math.hypot(…)` over alternatives"
-    )]
-    #[diagnostic(severity(warning))]
-    PreferMathHypot(#[label] Span),
+fn prefer_math_hypot(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer `Math.hypot(…)` over alternatives").with_label(span)
+}
 
-    #[error("eslint-plugin-unicorn(prefer-modern-math-apis): Prefer `Math.{1}(x)` over `{2}`")]
-    #[diagnostic(severity(warning))]
-    PreferMathLogN(#[label] Span, &'static str, String),
+fn prefer_math_log_n(span: Span, good_method: &str, bad_method: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer `Math.{good_method}(x)` over `{bad_method}`"))
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -50,17 +41,22 @@ declare_oxc_lint!(
     ///  - Prefer `Math.hypot(…)` over alternatives
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// Math.log(x) * Math.LOG10E;
     /// Math.sqrt(a * a + b * b);
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// Math.log10(x);
     /// Math.hypot(a, b);
     /// ```
     PreferModernMathApis,
+    unicorn,
     restriction,
+    pending
 );
 
 impl Rule for PreferModernMathApis {
@@ -98,7 +94,9 @@ impl Rule for PreferModernMathApis {
                     return;
                 };
 
-                let Some(arg) = call_expr.arguments[0].as_expression() else { return };
+                let Some(arg) = call_expr.arguments[0].as_expression() else {
+                    return;
+                };
 
                 let expressions = flat_plus_expression(arg);
                 if expressions.iter().any(|expr| !is_pow_2_expression(expr, ctx)) {
@@ -106,9 +104,9 @@ impl Rule for PreferModernMathApis {
                 }
 
                 if expressions.len() == 1 {
-                    ctx.diagnostic(PreferModernMathApisDiagnostic::PreferMathAbs(call_expr.span));
+                    ctx.diagnostic(prefer_math_abs(call_expr.span));
                 } else {
-                    ctx.diagnostic(PreferModernMathApisDiagnostic::PreferMathHypot(call_expr.span));
+                    ctx.diagnostic(prefer_math_hypot(call_expr.span));
                 }
             }
             _ => {}
@@ -158,10 +156,10 @@ fn check_prefer_log<'a>(expr: &BinaryExpression<'a>, ctx: &LintContext<'a>) {
                 return;
             };
 
-            ctx.diagnostic(PreferModernMathApisDiagnostic::PreferMathLogN(
+            ctx.diagnostic(prefer_math_log_n(
                 expr.span,
                 get_math_log_replacement(member_expr.static_property_name()),
-                clean_string(expr.span.source_text(ctx.source_text())),
+                &clean_string(expr.span.source_text(ctx.source_text())),
             ));
         }
         _ => {}
@@ -214,17 +212,17 @@ fn check_multiplication<'a, 'b>(
         return;
     };
 
-    ctx.diagnostic(PreferModernMathApisDiagnostic::PreferMathLogN(
+    ctx.diagnostic(prefer_math_log_n(
         expr_span,
         get_math_log_replacement(member_expr.static_property_name()),
-        clean_string(expr_span.source_text(ctx.source_text())),
+        &clean_string(expr_span.source_text(ctx.source_text())),
     ));
 }
 
 fn flat_plus_expression<'a>(expression: &'a Expression<'a>) -> Vec<&'a Expression<'a>> {
     let mut expressions = Vec::new();
 
-    match expression.without_parenthesized() {
+    match expression.without_parentheses() {
         Expression::BinaryExpression(bin_expr) => {
             if matches!(bin_expr.operator, BinaryOperator::Addition) {
                 expressions.append(&mut flat_plus_expression(&bin_expr.left));
@@ -240,11 +238,11 @@ fn flat_plus_expression<'a>(expression: &'a Expression<'a>) -> Vec<&'a Expressio
 }
 
 fn is_pow_2_expression(expression: &Expression, ctx: &LintContext<'_>) -> bool {
-    if let Expression::BinaryExpression(bin_expr) = expression.without_parenthesized() {
+    if let Expression::BinaryExpression(bin_expr) = expression.without_parentheses() {
         match bin_expr.operator {
             BinaryOperator::Exponential => {
                 if let Expression::NumericLiteral(number_lit) =
-                    &bin_expr.right.without_parenthesized()
+                    &bin_expr.right.without_parentheses()
                 {
                     (number_lit.value - 2_f64).abs() < f64::EPSILON
                 } else {
@@ -252,7 +250,7 @@ fn is_pow_2_expression(expression: &Expression, ctx: &LintContext<'_>) -> bool {
                 }
             }
             BinaryOperator::Multiplication => {
-                is_same_reference(&bin_expr.left, &bin_expr.right, ctx)
+                is_same_expression(&bin_expr.left, &bin_expr.right, ctx)
             }
             _ => false,
         }
@@ -413,5 +411,6 @@ fn test() {
 		",
     ];
 
-    Tester::new(PreferModernMathApis::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferModernMathApis::NAME, PreferModernMathApis::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

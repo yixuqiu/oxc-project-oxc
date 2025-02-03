@@ -1,32 +1,85 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
-use oxc_syntax::module_record::{ExportImportName, ImportImportName};
 
-use crate::{context::LintContext, rule::Rule};
+use crate::{
+    context::LintContext,
+    module_record::{ExportImportName, ImportImportName},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-import(named): named import {0:?} not found")]
-#[diagnostic(severity(warning), help("does {1:?} have the export {0:?}?"))]
-struct NamedDiagnostic(String, String, #[label] pub Span);
+fn named_diagnostic(imported_name: &str, module_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("named import {imported_name:?} not found"))
+        .with_help(format!("does {module_name:?} have the export {imported_name:?}?"))
+        .with_label(span)
+}
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/docs/rules/named.md>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/named.md>
 #[derive(Debug, Default, Clone)]
 pub struct Named;
 
 declare_oxc_lint!(
     /// ### What it does
     ///
+    /// Verifies that all named imports are part of the set of named exports in
+    /// the referenced module.
+    ///
+    /// For `export`, verifies that all named exports exist in the referenced
+    /// module.
+    ///
+    /// Note: for packages, the plugin will find exported names from
+    /// `jsnext:main` (deprecated) or `module`, if present in `package.json`.
+    /// Redux's npm module includes this key, and thereby is lintable, for
+    /// example.
+    ///
+    /// A module path that is ignored or not unambiguously an ES module will not
+    /// be reported when imported. Note that type imports and exports, as used
+    /// by Flow, are always ignored.
+    ///
     /// ### Why is this bad?
     ///
-    /// ### Example
-    /// ```javascript
+    /// Importing or exporting names that do not exist in the referenced module
+    /// can lead to runtime errors and confusion. It may suggest that certain
+    /// functionality is available when it is not, making the code harder to
+    /// maintain and understand. This rule helps ensure that your code
+    /// accurately reflects the available exports, improving reliability.
+    ///
+    /// ### Examples
+    ///
+    /// Given
+    /// ```js
+    /// // ./foo.js
+    /// export const foo = "I'm so foo";
+    /// ```
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
+    /// // ./baz.js
+    /// import { notFoo } from './foo'
+    ///
+    /// // ES7 proposal
+    /// export { notFoo as defNotBar } from './foo'
+    ///
+    /// // will follow 'jsnext:main', if available
+    /// import { dontCreateStore } from 'redux'
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// // ./bar.js
+    /// import { foo } from './foo'
+    ///
+    /// // ES7 proposal
+    /// export { foo as bar } from './foo'
+    ///
+    /// // node_modules without jsnext:main are not analyzed by default
+    /// // (import/ignore setting)
+    /// import { SomeNonsenseThatDoesntExist } from 'react'
     /// ```
     Named,
-    correctness
+    import,
+    nursery // There are race conditions in the runtime which may cause the module to
+            // not find any exports from `exported_bindings_from_star_export`.
 );
 
 impl Rule for Named {
@@ -38,8 +91,9 @@ impl Rule for Named {
             return;
         }
 
-        let module_record = semantic.module_record();
+        let module_record = ctx.module_record();
 
+        let loaded_modules = module_record.loaded_modules.read().unwrap();
         for import_entry in &module_record.import_entries {
             // Get named import
             let ImportImportName::Name(import_name) = &import_entry.import_name else {
@@ -47,33 +101,35 @@ impl Rule for Named {
             };
             let specifier = import_entry.module_request.name();
             // Get remote module record
-            let Some(remote_module_record_ref) = module_record.loaded_modules.get(specifier) else {
+            let Some(remote_module_record) = loaded_modules.get(specifier) else {
                 continue;
             };
-            let remote_module_record = remote_module_record_ref.value();
-            if remote_module_record.not_esm {
+            if !remote_module_record.has_module_syntax {
+                continue;
+            }
+            let import_span = import_name.span();
+            let name = import_name.name();
+            // Check `import { default as foo } from 'bar'`
+            if name == "default" && remote_module_record.export_default.is_some() {
                 continue;
             }
             // Check remote bindings
-            if remote_module_record.exported_bindings.contains_key(import_name.name()) {
+            if remote_module_record.exported_bindings.contains_key(name) {
                 continue;
             }
             // check re-export
             if remote_module_record
-                .exported_bindings_from_star_export
+                .exported_bindings_from_star_export()
                 .iter()
-                .any(|entry| entry.value().contains(import_name.name()))
+                .any(|(_, value)| value.contains(&import_name.name))
             {
                 continue;
             }
 
-            ctx.diagnostic(NamedDiagnostic(
-                import_name.name().to_string(),
-                specifier.to_string(),
-                import_name.span(),
-            ));
+            ctx.diagnostic(named_diagnostic(name, specifier, import_span));
         }
 
+        let loaded_modules = module_record.loaded_modules.read().unwrap();
         for export_entry in &module_record.indirect_export_entries {
             let Some(module_request) = &export_entry.module_request else {
                 continue;
@@ -83,24 +139,22 @@ impl Rule for Named {
             };
             let specifier = module_request.name();
             // Get remote module record
-            let Some(remote_module_record_ref) = module_record.loaded_modules.get(specifier) else {
+            let Some(remote_module_record) = loaded_modules.get(specifier) else {
                 continue;
             };
-            let remote_module_record = remote_module_record_ref.value();
+            if !remote_module_record.has_module_syntax {
+                continue;
+            }
             // Check remote bindings
             let name = import_name.name();
             // `export { default as foo } from './source'` <> `export default xxx`
-            if *name == "default" && remote_module_record.export_default.is_some() {
+            if name == "default" && remote_module_record.export_default.is_some() {
                 continue;
             }
             if remote_module_record.exported_bindings.contains_key(name) {
                 continue;
             }
-            ctx.diagnostic(NamedDiagnostic(
-                name.to_string(),
-                specifier.to_string(),
-                import_name.span(),
-            ));
+            ctx.diagnostic(named_diagnostic(name, specifier, import_name.span()));
         }
     }
 }
@@ -181,6 +235,7 @@ fn test() {
         // TypeScript export assignment
         "import x from './typescript-export-assign-object'",
         "export { default as foo } from './typescript-export-default'",
+        "import { default as foo } from './typescript-export-default'",
     ];
 
     let fail = vec![
@@ -217,7 +272,7 @@ fn test() {
         "import { FooBar } from './typescript-export-assign-object'",
     ];
 
-    Tester::new(Named::NAME, pass, fail)
+    Tester::new(Named::NAME, Named::PLUGIN, pass, fail)
         .change_rule_path("index.js")
         .with_import_plugin(true)
         .test_and_snapshot();

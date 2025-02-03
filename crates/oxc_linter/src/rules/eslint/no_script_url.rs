@@ -1,17 +1,16 @@
+use cow_utils::CowUtils;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-script-url): Script URL is a form of eval")]
-#[diagnostic(severity(warning), help("Disallow `javascript:` urls"))]
-struct NoScriptUrlDiagnostic(#[label] pub Span);
+fn no_script_url_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected `javascript:` url")
+        .with_help("Execute the code directly instead.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoScriptUrl;
@@ -21,9 +20,14 @@ declare_oxc_lint!(
     /// Disallow javascript: urls
     ///
     /// ### Why is this bad?
-    /// Using javascript: URLs is considered by some as a form of eval. Code passed in javascript: URLs has to be parsed and evaluated by the browser in the same way that eval is processed.
+    /// Using `javascript:` URLs is considered by some as a form of `eval`. Code
+    /// passed in `javascript:` URLs must be parsed and evaluated by the browser
+    /// in the same way that `eval` is processed. This can lead to security and
+    /// performance issues.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule
     /// ```javascript
     /// /*eslint no-script-url: "error"*/
     ///
@@ -32,6 +36,7 @@ declare_oxc_lint!(
     /// location.href = `javascript:void(0)`;
     /// ```
     NoScriptUrl,
+    eslint,
     style
 );
 
@@ -39,7 +44,7 @@ impl Rule for NoScriptUrl {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::StringLiteral(literal)
-                if literal.value.to_lowercase().starts_with("javascript:") =>
+                if literal.value.cow_to_ascii_lowercase().starts_with("javascript:") =>
             {
                 emit_diagnostic(ctx, literal.span);
             }
@@ -53,7 +58,7 @@ impl Rule for NoScriptUrl {
                         .unwrap()
                         .value
                         .raw
-                        .to_lowercase()
+                        .cow_to_ascii_lowercase()
                         .starts_with("javascript:")
                 {
                     emit_diagnostic(ctx, literal.span);
@@ -65,7 +70,7 @@ impl Rule for NoScriptUrl {
 }
 
 fn emit_diagnostic(ctx: &LintContext, span: Span) {
-    ctx.diagnostic(NoScriptUrlDiagnostic(Span::new(span.start, span.end)));
+    ctx.diagnostic(no_script_url_diagnostic(Span::new(span.start, span.end)));
 }
 
 fn is_tagged_template_expression(ctx: &LintContext, node: &AstNode, literal_span: Span) -> bool {
@@ -95,5 +100,5 @@ fn test() {
         "var a = `JavaScript:`;",
     ];
 
-    Tester::new(NoScriptUrl::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoScriptUrl::NAME, NoScriptUrl::PLUGIN, pass, fail).test_and_snapshot();
 }

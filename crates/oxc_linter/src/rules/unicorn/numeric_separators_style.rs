@@ -1,25 +1,19 @@
-use lazy_static::lazy_static;
+use cow_utils::CowUtils;
 use oxc_ast::{
     ast::{BigIntLiteral, NumericLiteral},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
-use regex::Regex;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(numeric-separators-style): Invalid group length in numeric value.")]
-#[diagnostic(
-    severity(warning),
-    help("Group digits with numeric separators (_) so longer numbers are easier to read.")
-)]
-struct NumericSeparatorsStyleDiagnostic(#[label] pub Span);
+fn numeric_separators_style_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Invalid group length in numeric value.")
+        .with_help("Group digits with numeric separators (_) so longer numbers are easier to read.")
+        .with_label(span)
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NumericSeparatorsStyle(Box<NumericSeparatorsStyleConfig>);
@@ -84,38 +78,41 @@ declare_oxc_lint!(
     /// ];
     /// ```
     NumericSeparatorsStyle,
-    style
+    unicorn,
+    style,
+    fix
 );
 
 impl Rule for NumericSeparatorsStyle {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::NumericLiteral(number) => {
-                if self.only_if_contains_separator && !number.raw.contains('_') {
+                let raw = number.raw.as_ref().unwrap().as_str();
+                if self.only_if_contains_separator && !raw.contains('_') {
                     return;
                 }
 
                 let formatted = self.format_number(number);
 
-                if formatted != number.raw {
-                    ctx.diagnostic_with_fix(NumericSeparatorsStyleDiagnostic(number.span), || {
-                        Fix::new(formatted, number.span)
-                    });
+                if formatted != raw {
+                    ctx.diagnostic_with_fix(
+                        numeric_separators_style_diagnostic(number.span),
+                        |fixer| fixer.replace(number.span, formatted),
+                    );
                 }
             }
-            AstKind::BigintLiteral(number) => {
-                let raw = number.span.source_text(ctx.source_text());
-
-                if self.only_if_contains_separator && !raw.contains('_') {
+            AstKind::BigIntLiteral(number) => {
+                if self.only_if_contains_separator && !number.raw.contains('_') {
                     return;
                 }
 
-                let formatted = self.format_bigint(number, raw);
+                let formatted = self.format_bigint(number, &number.raw);
 
                 if formatted.len() != number.span.size() as usize {
-                    ctx.diagnostic_with_fix(NumericSeparatorsStyleDiagnostic(number.span), || {
-                        Fix::new(formatted, number.span)
-                    });
+                    ctx.diagnostic_with_fix(
+                        numeric_separators_style_diagnostic(number.span),
+                        |fixer| fixer.replace(number.span, formatted),
+                    );
                 }
             }
             _ => {}
@@ -154,11 +151,12 @@ impl NumericSeparatorsStyle {
     fn format_number(&self, number: &NumericLiteral) -> String {
         use oxc_syntax::number::NumberBase;
 
+        let raw = number.raw.as_ref().unwrap();
         match number.base {
-            NumberBase::Binary => self.format_binary(number.raw),
-            NumberBase::Decimal | NumberBase::Float => self.format_decimal(number.raw),
-            NumberBase::Hex => self.format_hex(number.raw),
-            NumberBase::Octal => self.format_octal(number.raw),
+            NumberBase::Binary => self.format_binary(raw),
+            NumberBase::Decimal | NumberBase::Float => self.format_decimal(raw),
+            NumberBase::Hex => self.format_hex(raw),
+            NumberBase::Octal => self.format_octal(raw),
         }
     }
 
@@ -179,7 +177,7 @@ impl NumericSeparatorsStyle {
     fn format_binary(&self, raw_number: &str) -> String {
         let prefix = &raw_number[0..2];
 
-        let mut to_format = raw_number[2..].replace('_', "");
+        let mut to_format = raw_number[2..].cow_replace('_', "").into_owned();
 
         add_separators(&mut to_format, &SeparatorDir::Right, &self.binary);
         to_format.insert_str(0, prefix);
@@ -189,7 +187,7 @@ impl NumericSeparatorsStyle {
     fn format_hex(&self, number_raw: &str) -> String {
         let prefix = &number_raw[0..2];
 
-        let mut to_format = number_raw[2..].replace('_', "");
+        let mut to_format = number_raw[2..].cow_replace('_', "").into_owned();
 
         add_separators(&mut to_format, &SeparatorDir::Right, &self.hexadecimal);
         to_format.insert_str(0, prefix);
@@ -206,7 +204,7 @@ impl NumericSeparatorsStyle {
 
         let prefix = &number_raw[0..2];
 
-        let mut to_format = number_raw[2..].replace('_', "");
+        let mut to_format = number_raw[2..].cow_replace('_', "").into_owned();
 
         add_separators(&mut to_format, &SeparatorDir::Right, &self.octal);
         to_format.insert_str(0, prefix);
@@ -214,48 +212,51 @@ impl NumericSeparatorsStyle {
     }
 
     fn format_decimal(&self, number_raw: &str) -> String {
-        lazy_static! {
-            static ref NUMBER_REGEX: Regex =
-                Regex::new(r"^([\d._]*?)(?:([Ee])([+-])?([\d_]+))?$").unwrap();
+        let parsed = parse_number_literal(number_raw);
+
+        // Temporary string used for formatting the number
+        let mut tmp = String::with_capacity(number_raw.len());
+        // Final formatted output string
+        let mut out = String::with_capacity(number_raw.len());
+
+        let mut push_formatted_part = |part: &str, dir: &SeparatorDir, out: &mut String| {
+            tmp.push_str(part);
+            add_separators(&mut tmp, dir, &self.number);
+            out.push_str(&tmp);
+            tmp.clear();
+        };
+
+        if let Some(integer_part) = parsed.integer_part {
+            push_formatted_part(
+                integer_part.cow_replace('_', "").as_ref(),
+                &SeparatorDir::Right,
+                &mut out,
+            );
         }
 
-        let caps = NUMBER_REGEX.captures(number_raw).unwrap();
+        if let Some(decimal_part) = parsed.decimal_part {
+            out.push('.');
+            push_formatted_part(
+                decimal_part.cow_replace('_', "").as_ref(),
+                &SeparatorDir::Left,
+                &mut out,
+            );
+        }
 
-        let mut out = String::new();
+        if let Some(exponent_mark) = parsed.exponent_mark {
+            out.push(exponent_mark);
 
-        {
-            let number = caps.get(1).unwrap().as_str().replace('_', "");
-
-            if let Some((whole, decimal)) = number.split_once('.') {
-                if !whole.is_empty() {
-                    let mut s = whole.to_string();
-                    add_separators(&mut s, &SeparatorDir::Right, &self.number);
-                    out.push_str(&s);
-                };
-
-                out.push('.');
-
-                if !decimal.is_empty() {
-                    let mut s = decimal.to_string();
-                    add_separators(&mut s, &SeparatorDir::Left, &self.number);
-                    out.push_str(&s);
-                }
-            } else {
-                out.push_str(number.as_str());
-                add_separators(&mut out, &SeparatorDir::Right, &self.number);
+            if let Some(exponent_sign) = parsed.exponent_sign {
+                out.push_str(exponent_sign);
             }
-        }
 
-        if let Some(mark) = caps.get(2) {
-            out.push_str(mark.as_str());
-        }
-        if let Some(sign) = caps.get(3) {
-            out.push_str(sign.as_str());
-        }
-        if let Some(power) = caps.get(4) {
-            let mut s = power.as_str().replace('_', "");
-            add_separators(&mut s, &SeparatorDir::Right, &self.number);
-            out.push_str(&s);
+            if let Some(exponent_part) = parsed.exponent_part {
+                push_formatted_part(
+                    exponent_part.cow_replace('_', "").as_ref(),
+                    &SeparatorDir::Right,
+                    &mut out,
+                );
+            }
         }
 
         out
@@ -304,6 +305,75 @@ fn add_separators(s: &mut String, dir: &SeparatorDir, config: &NumericBaseConfig
             }
         }
     }
+}
+
+/// Represents a number literal, broken down into its integer, fractional, and exponent parts.
+#[derive(Debug)]
+struct ParsedNumberLiteral<'n> {
+    integer_part: Option<&'n str>,
+    decimal_part: Option<&'n str>,
+    exponent_mark: Option<char>,
+    exponent_sign: Option<&'n str>,
+    exponent_part: Option<&'n str>,
+}
+
+fn parse_number_literal(num: &str) -> ParsedNumberLiteral {
+    let mut parsed = ParsedNumberLiteral {
+        integer_part: None,
+        decimal_part: None,
+        exponent_mark: None,
+        exponent_sign: None,
+        exponent_part: None,
+    };
+
+    let mut offset = 0;
+
+    // Integer part is everything until the decimal separator or the exponent (exclusive).
+    let integer_part = num.split_once(['.', 'e', 'E']).map_or(num, |(integer, _)| integer);
+    offset += integer_part.len();
+
+    if !integer_part.is_empty() {
+        parsed.integer_part = Some(integer_part);
+    }
+
+    // Decimal separator is just a dot '.'.
+    if let Some(ch) = num[offset..].chars().next() {
+        if ch == '.' {
+            offset += 1;
+
+            // Decimal part is everything after the decimal separator until the exponent.
+            let decimal_part =
+                num[offset..].split_once(['e', 'E']).map_or(&num[offset..], |(decimal, _)| decimal);
+            offset += decimal_part.len();
+            if !decimal_part.is_empty() {
+                parsed.decimal_part = Some(decimal_part);
+            }
+        }
+    }
+
+    // Exponent marker is either 'e' or 'E", following the integer part.
+    if let Some(ch) = num[offset..].chars().next() {
+        if ch == 'e' || ch == 'E' {
+            parsed.exponent_mark = Some(ch);
+            offset += 1; // note: assuming that 'e' or 'E' is always one byte long
+
+            // Exponent sign is either '+' or '-', following the exponent marker.
+            if let Some(ch) = num[offset..].chars().next() {
+                if ch == '+' || ch == '-' {
+                    parsed.exponent_sign = Some(&num[offset..=offset]);
+                    offset += 1; // note: assuming that '+' or '-' is always one byte long
+                }
+            }
+
+            // Exponent part is everything after the exponent sign.
+            let exponent_part = &num[offset..];
+            if !exponent_part.is_empty() {
+                parsed.exponent_part = Some(exponent_part);
+            }
+        }
+    }
+
+    parsed
 }
 
 #[test]
@@ -355,7 +425,11 @@ fn test_with_snapshot() {
         "const foo = -100000_1",
     ];
 
-    Tester::new(NumericSeparatorsStyle::NAME, vec![], fail).test_and_snapshot();
+    let fix = vec![("const foo = 0b10_10_0001", "const foo = 0b1010_0001")];
+
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, vec![], fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }
 
 #[test]
@@ -384,7 +458,9 @@ fn test_number_binary() {
         ("const foo = 0B10101010101010", "const foo = 0B10_1010_1010_1010", None),
     ];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -410,7 +486,9 @@ fn test_number_hexadecimal() {
 
     let fix = vec![("const foo = 0xA_B_CDE_F0", "const foo = 0xA_BC_DE_F0", None)];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -437,7 +515,9 @@ fn test_number_octal() {
 
     let fix = vec![("const foo = 0o12_34_5670", "const foo = 0o1234_5670", None)];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -466,7 +546,9 @@ fn test_bigint_binary() {
         ("const foo = 0B10101010101010n", "const foo = 0B10_1010_1010_1010n", None),
     ];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -491,7 +573,9 @@ fn test_bigint() {
 
     let fix = vec![("const foo = 1_9_223n", "const foo = 19_223n", None)];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -533,7 +617,9 @@ fn test_number_decimal_exponential() {
         ("const foo = 3.65432E12000", "const foo = 3.654_32E12_000", None),
     ];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -560,7 +646,9 @@ fn test_number_decimal_float() {
 
     let fix = vec![("const foo = 9807.1234567", "const foo = 9807.123_456_7", None)];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
@@ -596,13 +684,16 @@ fn test_number_decimal_integer() {
         ("const foo = -100000_1", "const foo = -1_000_001", None),
     ];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).expect_fix(fix).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[test]
 fn test_with_config() {
-    use crate::tester::Tester;
     use serde_json::json;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         ("1234567890", Some(json!([{ "onlyIfContainsSeparator": true }]))),
@@ -627,7 +718,9 @@ fn test_with_config() {
 
     let fail = vec![];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .intentionally_allow_no_fix_tests()
+        .test();
 }
 
 #[test]
@@ -642,9 +735,12 @@ fn test_misc() {
         "const foo = '1234567n'",
     ];
 
-    let fail = vec![];
+    let fail = vec!["1_23_4444"];
+    let fix = vec![("1_23_4444", "1_234_444")];
 
-    Tester::new(NumericSeparatorsStyle::NAME, pass, fail).test();
+    Tester::new(NumericSeparatorsStyle::NAME, NumericSeparatorsStyle::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test();
 }
 
 #[cfg(test)]

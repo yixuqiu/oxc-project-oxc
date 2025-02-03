@@ -1,19 +1,17 @@
+use std::borrow::Cow;
+
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use phf::{phf_map, Map};
-use std::borrow::Cow;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule};
+use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-deprecated-functions): Disallow use of deprecated functions")]
-#[diagnostic(severity(warning), help("{0:?} has been deprecated in favor of {1:?}"))]
-pub struct DeprecatedFunction(pub String, pub String, #[label] pub Span);
+fn deprecated_function(deprecated: &str, new: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{deprecated:?} has been deprecated in favor of {new:?}"))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct JestConfig {
@@ -75,7 +73,9 @@ declare_oxc_lint!(
     /// jest.addMatchers // since Jest 17
     /// ```
     NoDeprecatedFunctions,
+    jest,
     style,
+    fix
 );
 
 const DEPRECATED_FUNCTIONS_MAP: Map<&'static str, (usize, &'static str)> = phf_map! {
@@ -127,8 +127,8 @@ impl Rule for NoDeprecatedFunctions {
         if let Some((base_version, replacement)) = DEPRECATED_FUNCTIONS_MAP.get(&node_name) {
             if jest_version_num >= *base_version {
                 ctx.diagnostic_with_fix(
-                    DeprecatedFunction(node_name, (*replacement).to_string(), mem_expr.span()),
-                    || Fix::new(*replacement, mem_expr.span()),
+                    deprecated_function(&node_name, replacement, mem_expr.span()),
+                    |fixer| fixer.replace(mem_expr.span(), *replacement),
                 );
             }
         }
@@ -188,7 +188,7 @@ fn tests() {
         ),
     ];
 
-    Tester::new(NoDeprecatedFunctions::NAME, pass, fail)
+    Tester::new(NoDeprecatedFunctions::NAME, NoDeprecatedFunctions::PLUGIN, pass, fail)
         .with_jest_plugin(true)
         .expect_fix(fix)
         .test_and_snapshot();

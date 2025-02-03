@@ -1,10 +1,7 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{CompactStr, Span};
 
 use crate::{
     context::LintContext,
@@ -13,20 +10,20 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(heading-has-content): Headings must have content and the content must be accessible by a screen reader.")]
-#[diagnostic(
-    severity(warning),
-    help("Provide screen reader accessible content when using heading elements.")
-)]
-struct HeadingHasContentDiagnostic(#[label] pub Span);
+fn heading_has_content_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Headings must have content and the content must be accessible by a screen reader.",
+    )
+    .with_help("Provide screen reader accessible content when using heading elements.")
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct HeadingHasContent(Box<HeadingHasContentConfig>);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct HeadingHasContentConfig {
-    components: Option<Vec<String>>,
+    components: Option<Vec<CompactStr>>,
 }
 
 impl std::ops::Deref for HeadingHasContent {
@@ -52,14 +49,18 @@ declare_oxc_lint!(
     /// from accessing information on the page's structure.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// <h1 />
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
+    /// <h1 />
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <h1>Foo</h1>
     /// ```
     HeadingHasContent,
+    jsx_a11y,
     correctness
 );
 
@@ -74,10 +75,7 @@ impl Rule for HeadingHasContent {
                 .and_then(|v| v.get("components"))
                 .and_then(serde_json::Value::as_array)
                 .map(|v| {
-                    v.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToString::to_string)
-                        .collect()
+                    v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect()
                 }),
         }))
     }
@@ -92,9 +90,7 @@ impl Rule for HeadingHasContent {
         // };
 
         // let name = iden.name.as_str();
-        let Some(name) = &get_element_type(ctx, jsx_el) else {
-            return;
-        };
+        let name = &get_element_type(ctx, jsx_el);
 
         if !DEFAULT_COMPONENTS.iter().any(|&comp| comp == name)
             && !self
@@ -105,8 +101,7 @@ impl Rule for HeadingHasContent {
             return;
         }
 
-        let maybe_parent = ctx.nodes().parent_node(node.id()).map(oxc_semantic::AstNode::kind);
-        if let Some(AstKind::JSXElement(parent)) = maybe_parent {
+        if let Some(AstKind::JSXElement(parent)) = ctx.nodes().parent_kind(node.id()) {
             if object_has_accessible_child(ctx, parent) {
                 return;
             }
@@ -116,7 +111,7 @@ impl Rule for HeadingHasContent {
             return;
         }
 
-        ctx.diagnostic(HeadingHasContentDiagnostic(jsx_el.span));
+        ctx.diagnostic(heading_has_content_diagnostic(jsx_el.span));
     }
 }
 
@@ -187,5 +182,7 @@ fn test() {
         // (r#"<h1><CustomInput type="hidden" /></h1>"#, None, Some(settings())),
     ];
 
-    Tester::new(HeadingHasContent::NAME, pass, fail).with_jsx_a11y_plugin(true).test_and_snapshot();
+    Tester::new(HeadingHasContent::NAME, HeadingHasContent::PLUGIN, pass, fail)
+        .with_jsx_a11y_plugin(true)
+        .test_and_snapshot();
 }

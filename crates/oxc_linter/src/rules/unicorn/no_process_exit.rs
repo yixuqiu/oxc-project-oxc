@@ -1,20 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{ast_util::is_method_call, context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-process-exit): Disallow `process.exit()`.")]
-#[diagnostic(
-    severity(warning),
-    help("Only use `process.exit()` in CLI apps. Throw an error instead.")
-)]
-struct NoProcessExitDiagnostic(#[label] pub Span);
+fn no_process_exit_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Don't use `process.exit()`")
+        .with_help("Throw an error instead.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoProcessExit;
@@ -27,18 +22,25 @@ declare_oxc_lint!(
     /// Only use `process.exit()` in CLI apps. Throw an error instead.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// if (problem) process.exit(1);
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// if (problem) throw new Error("message");
+    /// ```
     ///
-    /// #! /usr/bin/env node
+    /// ```
+    /// #!/usr/bin/env node
     /// if (problem) process.exit(1);
     /// ```
     NoProcessExit,
+    unicorn,
     restriction,
+    pending // TODO: suggestion
 );
 
 impl Rule for NoProcessExit {
@@ -52,20 +54,22 @@ impl Rule for NoProcessExit {
                     return;
                 }
 
-                ctx.diagnostic(NoProcessExitDiagnostic(expr.span));
+                ctx.diagnostic(no_process_exit_diagnostic(expr.span));
             }
         }
     }
 }
 
 fn has_hashbang(ctx: &LintContext) -> bool {
-    let Some(root) = ctx.nodes().root_node() else { return false };
+    let Some(root) = ctx.nodes().root_node() else {
+        return false;
+    };
     let AstKind::Program(program) = root.kind() else { unreachable!() };
     program.hashbang.is_some()
 }
 
 fn is_inside_process_event_handler(ctx: &LintContext, node: &AstNode) -> bool {
-    for parent in ctx.nodes().iter_parents(node.id()) {
+    for parent in ctx.nodes().ancestors(node.id()) {
         if let AstKind::CallExpression(expr) = parent.kind() {
             if is_method_call(expr, Some(&["process"]), Some(&["on", "once"]), Some(1), None) {
                 return true;
@@ -77,8 +81,8 @@ fn is_inside_process_event_handler(ctx: &LintContext, node: &AstNode) -> bool {
 }
 
 fn is_worker_threads_imported(ctx: &LintContext) -> bool {
-    ctx.semantic().module_record().import_entries.iter().any(|entry| {
-        matches!(entry.module_request.name().as_str(), "worker_threads" | "node:worker_threads")
+    ctx.module_record().import_entries.iter().any(|entry| {
+        matches!(entry.module_request.name(), "worker_threads" | "node:worker_threads")
     })
 }
 
@@ -183,5 +187,5 @@ fn test() {
         (r#"lib.process.once("SIGINT", function() { process.exit(1); })"#),
     ];
 
-    Tester::new(NoProcessExit::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoProcessExit::NAME, NoProcessExit::PLUGIN, pass, fail).test_and_snapshot();
 }

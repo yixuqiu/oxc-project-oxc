@@ -1,17 +1,15 @@
 use oxc_ast::{ast::JSXElementName, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-img-element): Prevent usage of `<img>` element due to slower LCP and higher bandwidth.")]
-#[diagnostic(severity(warning), help("See https://nextjs.org/docs/messages/no-img-element"))]
-struct NoImgElementDiagnostic(#[label] pub Span);
+fn no_img_element_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prevent usage of `<img>` element due to slower LCP and higher bandwidth.")
+        .with_help("See https://nextjs.org/docs/messages/no-img-element")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoImgElement;
@@ -27,12 +25,15 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoImgElement,
+    nextjs,
     correctness
 );
 
 impl Rule for NoImgElement {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::JSXOpeningElement(jsx_opening_element) = node.kind() else { return };
+        let AstKind::JSXOpeningElement(jsx_opening_element) = node.kind() else {
+            return;
+        };
 
         let JSXElementName::Identifier(jsx_opening_element_name) = &jsx_opening_element.name else {
             return;
@@ -42,8 +43,12 @@ impl Rule for NoImgElement {
             return;
         }
 
-        let Some(parent) = ctx.nodes().parent_node(node.id()) else { return };
-        let Some(parent) = ctx.nodes().parent_node(parent.id()) else { return };
+        let Some(parent) = ctx.nodes().parent_node(node.id()) else {
+            return;
+        };
+        let Some(parent) = ctx.nodes().parent_node(parent.id()) else {
+            return;
+        };
 
         if let AstKind::JSXElement(maybe_picture_jsx_elem) = parent.kind() {
             if let JSXElementName::Identifier(jsx_opening_element_name) =
@@ -55,7 +60,7 @@ impl Rule for NoImgElement {
             }
         }
 
-        ctx.diagnostic(NoImgElementDiagnostic(jsx_opening_element_name.span));
+        ctx.diagnostic(no_img_element_diagnostic(jsx_opening_element_name.span));
     }
 }
 
@@ -143,5 +148,5 @@ fn test() {
 			      }"#,
     ];
 
-    Tester::new(NoImgElement::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoImgElement::NAME, NoImgElement::PLUGIN, pass, fail).test_and_snapshot();
 }

@@ -1,17 +1,19 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-is-mounted): Do not use isMounted")]
-#[diagnostic(severity(warning), help("isMounted is on its way to being officially deprecated. You can use a _isMounted property to track the mounted status yourself."))]
-struct NoIsMountedDiagnostic(#[label] pub Span);
+fn no_is_mounted_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not use isMounted")
+        .with_help("isMounted is on its way to being officially deprecated. You can use a _isMounted property to track the mounted status yourself.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoIsMounted;
@@ -27,7 +29,7 @@ declare_oxc_lint!(
     /// and it is on its way to being officially deprecated.///
     ///
     /// ### Example
-    /// ```javascript
+    /// ```jsx
     /// class Hello extends React.Component {
     ///     someMethod() {
     ///         if (!this.isMounted()) {
@@ -40,6 +42,7 @@ declare_oxc_lint!(
     /// };
     /// ```
     NoIsMounted,
+    react,
     correctness
 );
 
@@ -58,15 +61,19 @@ impl Rule for NoIsMounted {
             return;
         }
 
-        for ancestor in ctx.nodes().ancestors(node.id()).skip(1) {
+        for ancestor in ctx.nodes().ancestor_ids(node.id()).skip(1) {
             if matches!(
                 ctx.nodes().kind(ancestor),
                 AstKind::ObjectProperty(_) | AstKind::MethodDefinition(_)
             ) {
-                ctx.diagnostic(NoIsMountedDiagnostic(call_expr.span));
+                ctx.diagnostic(no_is_mounted_diagnostic(call_expr.span));
                 break;
             }
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -146,5 +153,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoIsMounted::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoIsMounted::NAME, NoIsMounted::PLUGIN, pass, fail).test_and_snapshot();
 }

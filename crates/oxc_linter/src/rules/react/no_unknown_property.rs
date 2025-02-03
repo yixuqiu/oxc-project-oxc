@@ -1,37 +1,50 @@
+use std::borrow::Cow;
+
+use cow_utils::CowUtils;
 use itertools::Itertools;
-use once_cell::sync::Lazy;
+use lazy_static::lazy_static;
 use oxc_ast::{
     ast::{JSXAttributeItem, JSXAttributeName, JSXElementName},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use phf::{phf_map, phf_set, Map, Set};
-use regex::Regex;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
-use std::collections::hash_map::HashMap;
-use std::collections::hash_set::HashSet;
 
-use crate::{context::LintContext, rule::Rule, utils::get_jsx_attribute_name, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    utils::get_jsx_attribute_name,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoUnknownPropertyDiagnostic {
-    #[error("eslint-plugin-react(no-unknown-property): Invalid property found")]
-    #[diagnostic(severity(warning), help("Property '{1}' is only allowed on: {2}"))]
-    InvalidPropOnTag(#[label] Span, String, String),
-    #[error("eslint-plugin-react(no-unknown-property): React does not recognize data-* props with uppercase characters on a DOM element")]
-    #[diagnostic(severity(warning), help("Use '{1}' instead"))]
-    DataLowercaseRequired(#[label] Span, String),
-    #[error("eslint-plugin-react(no-unknown-property): Unknown property found")]
-    #[diagnostic(severity(warning), help("Use '{1}' instead"))]
-    UnknownPropWithStandardName(#[label] Span, String),
-    #[error("eslint-plugin-react(no-unknown-property): Unknown property found")]
-    #[diagnostic(severity(warning), help("Remove unknown property"))]
-    UnknownProp(#[label] Span),
+fn invalid_prop_on_tag(span: Span, prop: &str, tag: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Invalid property found")
+        .with_help(format!("Property '{prop}' is only allowed on: {tag}"))
+        .with_label(span)
+}
+
+fn data_lowercase_required(span: Span, suggested_prop: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "React does not recognize data-* props with uppercase characters on a DOM element",
+    )
+    .with_help(format!("Use '{suggested_prop}' instead"))
+    .with_label(span)
+}
+
+fn unknown_prop_with_standard_name(span: Span, x1: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unknown property found")
+        .with_help(format!("Use '{x1}' instead"))
+        .with_label(span)
+}
+
+fn unknown_prop(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unknown property found")
+        .with_help("Remove unknown property")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -41,7 +54,7 @@ pub struct NoUnknownProperty(Box<NoUnknownPropertyConfig>);
 #[serde(rename_all = "camelCase")]
 pub struct NoUnknownPropertyConfig {
     #[serde(default)]
-    ignore: HashSet<String>,
+    ignore: FxHashSet<Cow<'static, str>>,
     #[serde(default)]
     require_data_lowercase: bool,
 }
@@ -63,8 +76,11 @@ declare_oxc_lint!(
     ///  const IconButton = <div aria-foo="bar" />;
     /// ```
     NoUnknownProperty,
-    restriction
+    react,
+    restriction,
+    pending
 );
+
 const ATTRIBUTE_TAGS_MAP: Map<&'static str, Set<&'static str>> = phf_map! {
     "abbr" => phf_set! {"th", "td"},
     "charset" => phf_set! {"meta"},
@@ -410,26 +426,44 @@ const DOM_PROPERTIES_IGNORE_CASE: [&str; 5] = [
     "webkitDirectory",
 ];
 
-static DOM_PROPERTIES_LOWER_MAP: Lazy<HashMap<String, &'static str>> = Lazy::new(|| {
-    DOM_PROPERTIES_NAMES.iter().map(|it| (it.to_lowercase(), *it)).collect::<HashMap<_, _>>()
-});
+lazy_static! {
+    static ref DOM_PROPERTIES_LOWER_MAP: FxHashMap<Cow<'static, str>, &'static str> =
+        DOM_PROPERTIES_NAMES
+            .iter()
+            .map(|it| (it.cow_to_ascii_lowercase(), *it))
+            .collect::<FxHashMap<_, _>>();
+}
 
-///
 /// Checks if an attribute name is a valid `data-*` attribute:
-/// if the name starts with "data-" and has alphanumeric words (browsers require lowercase, but React and TS lowercase them),
-/// not start with any casing of "xml", and separated by hyphens (-) (which is also called "kebab case" or "dash case"),
-/// then the attribute is a valid data attribute.
-///
+/// - Name starts with "data-" and has alphanumeric words (browsers require lowercase, but React and TS lowercase them),
+/// - Does not start with any casing of "xml"
+/// - Words are separated by hyphens (-) (which is also called "kebab case" or "dash case")
 fn is_valid_data_attr(name: &str) -> bool {
-    static DATA_ATTR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^data(-?[^:]*)$").unwrap());
+    if !name.starts_with("data-") {
+        return false;
+    }
 
-    !name.to_lowercase().starts_with("data-xml") && DATA_ATTR_REGEX.is_match(name)
+    if name.cow_to_ascii_lowercase().starts_with("data-xml") {
+        return false;
+    }
+
+    let data_name = &name["data-".len()..];
+    if data_name.is_empty() {
+        return false;
+    }
+
+    data_name.chars().all(|c| c != ':')
+}
+
+/// Checks if a tag name matches the HTML tag conventions.
+fn matches_html_tag_conventions(tag: &str) -> bool {
+    tag.char_indices().all(|(i, c)| if i == 0 { c.is_ascii_lowercase() } else { c != '-' })
 }
 
 fn normalize_attribute_case(name: &str) -> &str {
     DOM_PROPERTIES_IGNORE_CASE
         .iter()
-        .find(|camel_name| camel_name.to_lowercase() == name.to_lowercase())
+        .find(|camel_name| camel_name.eq_ignore_ascii_case(name))
         .unwrap_or(&name)
 }
 fn has_uppercase(name: &str) -> bool {
@@ -444,9 +478,8 @@ impl Rule for NoUnknownProperty {
             .and_then(|value| serde_json::from_value(value.clone()).ok())
             .map_or_else(Self::default, |value| Self(Box::new(value)))
     }
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        static HTML_TAG_CONVENTION: Lazy<Regex> = Lazy::new(|| Regex::new("^[a-z][^-]*$").unwrap());
 
+    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         let AstKind::JSXOpeningElement(el) = &node.kind() else {
             return;
         };
@@ -460,7 +493,7 @@ impl Rule for NoUnknownProperty {
             return;
         }
 
-        let is_valid_html_tag = HTML_TAG_CONVENTION.is_match(el_type)
+        let is_valid_html_tag = matches_html_tag_conventions(el_type)
             && el.attributes.iter().all(|attr| {
                 let JSXAttributeItem::Attribute(jsx_attr) = attr else {
                     return true;
@@ -483,25 +516,25 @@ impl Rule for NoUnknownProperty {
                 if self.0.ignore.contains(&(actual_name)) {
                     return;
                 };
-                if is_valid_data_attr(actual_name.as_str()) {
-                    if self.0.require_data_lowercase && has_uppercase(actual_name.as_str()) {
-                        ctx.diagnostic(NoUnknownPropertyDiagnostic::DataLowercaseRequired(
+                if is_valid_data_attr(&actual_name) {
+                    if self.0.require_data_lowercase && has_uppercase(&actual_name) {
+                        ctx.diagnostic(data_lowercase_required(
                             span,
-                            actual_name.to_lowercase(),
+                            &actual_name.cow_to_ascii_lowercase(),
                         ));
                     }
                     return;
                 };
-                if ARIA_PROPERTIES.contains(actual_name.as_str()) || !is_valid_html_tag {
+                if ARIA_PROPERTIES.contains(&actual_name) || !is_valid_html_tag {
                     return;
                 };
-                let name = normalize_attribute_case(actual_name.as_str());
+                let name = normalize_attribute_case(&actual_name);
                 if let Some(tags) = ATTRIBUTE_TAGS_MAP.get(name) {
                     if !tags.contains(el_type) {
-                        ctx.diagnostic(NoUnknownPropertyDiagnostic::InvalidPropOnTag(
+                        ctx.diagnostic(invalid_prop_on_tag(
                             span,
-                            actual_name.to_string(),
-                            tags.iter().join(", "),
+                            &actual_name,
+                            &tags.iter().join(", "),
                         ));
                     }
                     return;
@@ -512,22 +545,21 @@ impl Rule for NoUnknownProperty {
                 }
 
                 DOM_PROPERTIES_LOWER_MAP
-                    .get(&name.to_lowercase())
+                    .get(&name.cow_to_ascii_lowercase())
                     .or_else(|| DOM_ATTRIBUTES_TO_CAMEL.get(name))
                     .map_or_else(
                         || {
-                            ctx.diagnostic(NoUnknownPropertyDiagnostic::UnknownProp(span));
+                            ctx.diagnostic(unknown_prop(span));
                         },
                         |prop| {
-                            ctx.diagnostic(
-                                NoUnknownPropertyDiagnostic::UnknownPropWithStandardName(
-                                    span,
-                                    (*prop).to_string(),
-                                ),
-                            );
+                            ctx.diagnostic(unknown_prop_with_standard_name(span, prop));
                         },
                     );
             });
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -727,5 +759,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoUnknownProperty::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnknownProperty::NAME, NoUnknownProperty::PLUGIN, pass, fail).test_and_snapshot();
 }

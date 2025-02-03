@@ -2,23 +2,25 @@ use oxc_ast::{
     ast::{ExportDefaultDeclarationKind, TSType},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(consistent-type-definitions):")]
-#[diagnostic(severity(warning), help("Use an `{0}` instead of a `{1}`"))]
-struct ConsistentTypeDefinitionsDiagnostic(
-    &'static str,
-    &'static str,
-    #[label("Use an `{0}` instead of a `{1}`")] pub Span,
-);
+fn consistent_type_definitions_diagnostic(
+    preferred_type_kind: &str,
+    bad_type_kind: &str,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Use an `{preferred_type_kind}` instead of a `{bad_type_kind}`"))
+        .with_help(format!("Use an `{preferred_type_kind}` instead of a `{bad_type_kind}`"))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ConsistentTypeDefinitions {
@@ -54,7 +56,9 @@ declare_oxc_lint!(
     /// }
     /// ```
     ConsistentTypeDefinitions,
-    style
+    typescript,
+    style,
+    fix
 );
 
 impl Rule for ConsistentTypeDefinitions {
@@ -75,8 +79,11 @@ impl Rule for ConsistentTypeDefinitions {
                 TSType::TSTypeLiteral(_)
                     if self.config == ConsistentTypeDefinitionsConfig::Interface =>
                 {
-                    let start = if decl.modifiers.is_contains_declare() {
-                        decl.span.start + 8
+                    let start = if decl.declare {
+                        let base_start = decl.span.start + 7;
+                        ctx.source_range(Span::new(base_start, decl.span.end))
+                            .find("type")
+                            .map_or(base_start + 1, |v| u32::try_from(v).unwrap_or(0) + base_start)
                     } else {
                         decl.span.start
                     };
@@ -97,15 +104,15 @@ impl Rule for ConsistentTypeDefinitions {
                             &ctx.source_text()[body_span.start as usize..body_span.end as usize];
 
                         ctx.diagnostic_with_fix(
-                            ConsistentTypeDefinitionsDiagnostic(
+                            consistent_type_definitions_diagnostic(
                                 "interface",
                                 "type",
                                 Span::new(start, start + 4),
                             ),
-                            || {
-                                Fix::new(
-                                    format!("interface {name} {body}"),
+                            |fixer| {
+                                fixer.replace(
                                     Span::new(start, decl.span.end),
+                                    format!("interface {name} {body}"),
                                 )
                             },
                         );
@@ -154,15 +161,15 @@ impl Rule for ConsistentTypeDefinitions {
                     };
 
                     ctx.diagnostic_with_fix(
-                        ConsistentTypeDefinitionsDiagnostic(
+                        consistent_type_definitions_diagnostic(
                             "type",
                             "interface",
                             Span::new(decl.span.start, decl.span.start + 9),
                         ),
-                        || {
-                            Fix::new(
+                        |fixer| {
+                            fixer.replace(
+                                exp.span,
                                 format!("type {name} = {body}{extends}\nexport default {name}"),
-                                Span::new(exp.span.start, exp.span.end),
                             )
                         },
                     );
@@ -173,8 +180,11 @@ impl Rule for ConsistentTypeDefinitions {
             AstKind::TSInterfaceDeclaration(decl)
                 if self.config == ConsistentTypeDefinitionsConfig::Type =>
             {
-                let start = if decl.modifiers.is_contains_declare() {
-                    decl.span.start + 8
+                let start = if decl.declare {
+                    let base_start = decl.span.start + 7;
+                    ctx.source_range(Span::new(base_start, decl.span.end))
+                        .find("interface")
+                        .map_or(base_start + 1, |v| u32::try_from(v).unwrap_or(0) + base_start)
                 } else {
                     decl.span.start
                 };
@@ -212,21 +222,25 @@ impl Rule for ConsistentTypeDefinitions {
                 };
 
                 ctx.diagnostic_with_fix(
-                    ConsistentTypeDefinitionsDiagnostic(
+                    consistent_type_definitions_diagnostic(
                         "type",
                         "interface",
                         Span::new(start, start + 9),
                     ),
-                    || {
-                        Fix::new(
-                            format!("type {name} = {body}{extends}"),
+                    |fixer| {
+                        fixer.replace(
                             Span::new(start, decl.span.end),
+                            format!("type {name} = {body}{extends}"),
                         )
                     },
                 );
             }
             _ => {}
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -360,6 +374,11 @@ fn test() {
 			      ",
             Some(serde_json::json!(["type"])),
         ),
+        // Issue: <https://github.com/oxc-project/oxc/issues/7552>
+        ("declaretype S={}", Some(serde_json::json!(["interface"]))),
+        ("declareinterface S {}", Some(serde_json::json!(["type"]))),
+        ("export declaretype S={}", Some(serde_json::json!(["interface"]))),
+        ("export declareinterface S {}", Some(serde_json::json!(["type"]))),
     ];
 
     let fix = vec![
@@ -500,7 +519,22 @@ export declare type Test = {
             ",
             Some(serde_json::json!(["type"])),
         ),
+        // Issue: <https://github.com/oxc-project/oxc/issues/7552>
+        ("declaretype S={}", "declareinterface S {}", Some(serde_json::json!(["interface"]))),
+        ("declareinterface S {}", "declaretype S = {}", Some(serde_json::json!(["type"]))),
+        (
+            "export declaretype S={}",
+            "export declareinterface S {}",
+            Some(serde_json::json!(["interface"])),
+        ),
+        (
+            "export declareinterface S {}",
+            "export declaretype S = {}",
+            Some(serde_json::json!(["type"])),
+        ),
     ];
 
-    Tester::new(ConsistentTypeDefinitions::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(ConsistentTypeDefinitions::NAME, ConsistentTypeDefinitions::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

@@ -1,16 +1,19 @@
-const { parseArgs } = require("node:util");
+const { parseArgs } = require('node:util');
 const {
   ALL_TARGET_PLUGINS,
   createESLintLinter,
   loadTargetPluginRules,
-} = require("./eslint-rules.cjs");
+} = require('./eslint-rules.cjs');
 const {
   createRuleEntries,
   updateNotSupportedStatus,
   updateImplementedStatus,
-} = require("./oxlint-rules.cjs");
-const { renderMarkdown } = require("./markdown-renderer.cjs");
-const { updateGitHubIssue } = require("./result-reporter.cjs");
+  overrideTypeScriptPluginStatusWithEslintPluginStatus: syncTypeScriptPluginStatusWithEslintPluginStatus,
+  syncVitestPluginStatusWithJestPluginStatus,
+  syncUnicornPluginStatusWithEslintPluginStatus,
+} = require('./oxlint-rules.cjs');
+const { renderMarkdown } = require('./markdown-renderer.cjs');
+const { updateGitHubIssue } = require('./result-reporter.cjs');
 
 const HELP = `
 Usage:
@@ -21,7 +24,7 @@ Options:
   --update: Update the issue instead of printing to stdout
   --help, -h: Print this help message
 
-Plugins: ${Array.from(ALL_TARGET_PLUGINS.keys()).join(", ")}
+Plugins: ${Array.from(ALL_TARGET_PLUGINS.keys()).join(', ')}
 `;
 
 (async () => {
@@ -31,9 +34,9 @@ Plugins: ${Array.from(ALL_TARGET_PLUGINS.keys()).join(", ")}
   const { values } = parseArgs({
     options: {
       // Mainly for debugging
-      target: { type: "string", short: "t", multiple: true },
-      update: { type: "boolean" },
-      help: { type: "boolean", short: "h" },
+      target: { type: 'string', short: 't', multiple: true },
+      update: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
     },
   });
 
@@ -59,16 +62,18 @@ Plugins: ${Array.from(ALL_TARGET_PLUGINS.keys()).join(", ")}
   const ruleEntries = createRuleEntries(linter.getRules());
   await updateImplementedStatus(ruleEntries);
   updateNotSupportedStatus(ruleEntries);
+  await syncTypeScriptPluginStatusWithEslintPluginStatus(ruleEntries);
+  await syncVitestPluginStatusWithJestPluginStatus(ruleEntries);
+  syncUnicornPluginStatusWithEslintPluginStatus(ruleEntries);
 
   //
   // Render list and update if necessary
   //
   const results = await Promise.allSettled(
     Array.from(targetPluginNames).map((pluginName) => {
-      const pluginMeta =
-        /** @type {import("./eslint-rules.cjs").TargetPluginMeta} */ (
-          ALL_TARGET_PLUGINS.get(pluginName)
-        );
+      const pluginMeta = /** @type {import("./eslint-rules.cjs").TargetPluginMeta} */ (
+        ALL_TARGET_PLUGINS.get(pluginName)
+      );
       const content = renderMarkdown(pluginName, pluginMeta, ruleEntries);
 
       if (!values.update) return Promise.resolve(content);
@@ -77,7 +82,7 @@ Plugins: ${Array.from(ALL_TARGET_PLUGINS.keys()).join(", ")}
     }),
   );
   for (const result of results) {
-    if (result.status === "fulfilled") console.log(result.value);
-    if (result.status === "rejected") console.error(result.reason);
+    if (result.status === 'fulfilled') console.log(result.value);
+    if (result.status === 'rejected') console.error(result.reason);
   }
 })();

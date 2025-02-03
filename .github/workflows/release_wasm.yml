@@ -1,5 +1,7 @@
 name: Release WASM
 
+permissions: {}
+
 on:
   workflow_dispatch:
   push:
@@ -20,10 +22,10 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       version_changed: ${{ steps.version.outputs.changed }}
     steps:
-      - uses: taiki-e/checkout-action@v1
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
 
       - name: Check version changes
-        uses: EndBug/version-check@v2
+        uses: EndBug/version-check@36ff30f37c7deabe56a30caa043d127be658c425 # v2
         id: version
         with:
           static-checking: localIsNew
@@ -32,8 +34,11 @@ jobs:
 
       - name: Set version name
         if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION_NUMBER: ${{ steps.version.outputs.version }}
+          VERSION_TYPE: ${{ steps.version.outputs.version_type }}
         run: |
-          echo "Version change found! New version: ${{ steps.version.outputs.version }} (${{ steps.version.outputs.version_type }})"
+          echo "Version change found! New version: ${VERSION_NUMBER} (${VERSION_TYPE})"
 
   build:
     needs: check
@@ -41,32 +46,30 @@ jobs:
     name: Release WASM
     runs-on: ubuntu-latest
     permissions:
-      id-token: write # for `npm publish --provenance`
+      id-token: write # for `pnpm publish --provenance`
     steps:
-      - uses: taiki-e/checkout-action@v1
+      - uses: taiki-e/checkout-action@b13d20b7cda4e2f325ef19895128f7ff735c0b3d # v1.3.1
 
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: 'https://registry.npmjs.org'
+      - uses: ./.github/actions/pnpm
 
-      - name: Install Rust Toolchain
-        uses: ./.github/actions/rustup
+      - uses: oxc-project/setup-rust@cd82e1efec7fef815e2c23d296756f31c7cdc03d # v1.0.0
         with:
-          shared-key: 'wasm'
+          cache-key: "wasm"
+          tools: wasm-pack
 
       - name: Build
         working-directory: wasm/parser
         run: |
           rustup target add wasm32-unknown-unknown
-          corepack enable
-          pnpm install
           pnpm run build
           pnpm run test
+
+      - name: Check
+        working-directory: npm/parser-wasm
+        run: pnpm run check
 
       - name: Publish
         working-directory: npm/parser-wasm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public # --tag alpha
+        run: pnpm publish --provenance --access public --no-git-checks

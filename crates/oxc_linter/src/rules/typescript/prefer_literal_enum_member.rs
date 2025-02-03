@@ -1,18 +1,22 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(prefer-literal-enum-member): Explicit enum value must only be a literal value (string, number, boolean, etc).")]
-#[diagnostic(severity(warning), help("Require all enum members to be literal values."))]
-struct PreferLiteralEnumMemberDiagnostic(#[label] pub Span);
+fn prefer_literal_enum_member_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Explicit enum value must only be a literal value (string, number, boolean, etc).",
+    )
+    .with_help("Require all enum members to be literal values.")
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferLiteralEnumMember {
@@ -28,7 +32,7 @@ declare_oxc_lint!(
     /// However, because enums create their own scope whereby each enum member becomes a variable in that scope, developers are often surprised at the resultant values.
     ///
     /// ### Example
-    /// ```javascript
+    /// ```ts
     /// const imOutside = 2;
     /// const b = 2;
     /// enum Foo {
@@ -39,7 +43,8 @@ declare_oxc_lint!(
     /// }
     /// ```
     PreferLiteralEnumMember,
-    correctness
+    typescript,
+    restriction
 );
 
 impl Rule for PreferLiteralEnumMember {
@@ -53,9 +58,14 @@ impl Rule for PreferLiteralEnumMember {
                 .unwrap_or(false),
         }
     }
+
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::TSEnumMember(decl) = node.kind() else { return };
-        let Some(initializer) = &decl.initializer else { return };
+        let AstKind::TSEnumMember(decl) = node.kind() else {
+            return;
+        };
+        let Some(initializer) = &decl.initializer else {
+            return;
+        };
         if initializer.is_literal() {
             return;
         }
@@ -101,7 +111,11 @@ impl Rule for PreferLiteralEnumMember {
             }
         }
 
-        ctx.diagnostic(PreferLiteralEnumMemberDiagnostic(decl.span));
+        ctx.diagnostic(prefer_literal_enum_member_diagnostic(decl.span));
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -343,5 +357,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(PreferLiteralEnumMember::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferLiteralEnumMember::NAME, PreferLiteralEnumMember::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

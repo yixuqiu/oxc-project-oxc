@@ -1,19 +1,16 @@
-use oxc_ast::ast::Expression;
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_ast::{ast::Expression, AstKind};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::BinaryOperator;
 
-use crate::{context::LintContext, fixer::Fix, rule::Rule, AstNode};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-instanceof-array): Use `Array.isArray()` instead of `instanceof Array`.")]
-#[diagnostic(severity(warning), help("The instanceof Array check doesn't work across realms/contexts, for example, frames/windows in browsers or the vm module in Node.js."))]
-struct NoInstanceofArrayDiagnostic(#[label] pub Span);
+fn no_instanceof_array_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `Array.isArray()` instead of `instanceof Array`.")
+        .with_help("The instanceof Array check doesn't work across realms/contexts, for example, frames/windows in browsers or the vm module in Node.js.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoInstanceofArray;
@@ -31,27 +28,31 @@ declare_oxc_lint!(
     /// [1,2,3] instanceof Array;
     /// ```
     NoInstanceofArray,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for NoInstanceofArray {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::BinaryExpression(expr) = node.kind() else { return };
+        let AstKind::BinaryExpression(expr) = node.kind() else {
+            return;
+        };
         if expr.operator != BinaryOperator::Instanceof {
             return;
         }
 
-        match &expr.right.without_parenthesized() {
+        match &expr.right.without_parentheses() {
             Expression::Identifier(identifier) if identifier.name == "Array" => {
-                ctx.diagnostic_with_fix(NoInstanceofArrayDiagnostic(expr.span), || {
+                ctx.diagnostic_with_fix(no_instanceof_array_diagnostic(expr.span), |fixer| {
                     let modified_code = {
                         let mut codegen = String::new();
                         codegen.push_str("Array.isArray(");
-                        codegen.push_str(expr.left.span().source_text(ctx.source_text()));
+                        codegen.push_str(fixer.source_range(expr.left.span()));
                         codegen.push(')');
                         codegen
                     };
-                    Fix::new(modified_code, expr.span)
+                    fixer.replace(expr.span, modified_code)
                 });
             }
             _ => {}
@@ -101,5 +102,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoInstanceofArray::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoInstanceofArray::NAME, NoInstanceofArray::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

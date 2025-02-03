@@ -1,27 +1,27 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-proto): The '__proto__' property is deprecated")]
-#[diagnostic(severity(warning), help("Disallow the use of the `__proto__` property."))]
-struct NoProtoDiagnostic(#[label] pub Span);
+fn no_proto_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("The '__proto__' property is deprecated")
+        .with_help("use `Object.getPrototypeOf` and `Object.setPrototypeOf` instead.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoProto;
 
 declare_oxc_lint!(
     /// ### What it does
-    /// Disallow the use of the __proto__ property
+    /// Disallow the use of the `__proto__` property
     ///
     /// ### Why is this bad?
-    /// __proto__ property has been deprecated as of ECMAScript 3.1 and shouldn’t be used in the code. Use Object.getPrototypeOf and Object.setPrototypeOf instead.
+    /// The `__proto__` property has been deprecated as of ECMAScript 3.1 and
+    /// shouldn’t be used in new code. Use `Object.getPrototypeOf` and
+    /// `Object.setPrototypeOf` instead.
     ///
     /// ### Example
     /// ```javascript
@@ -36,15 +36,19 @@ declare_oxc_lint!(
     /// obj["__proto__"] = b;
     /// ```
     NoProto,
-    restriction
+    eslint,
+    restriction,
+    pending
 );
 
 impl Rule for NoProto {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::MemberExpression(member_expression) = node.kind() else { return };
+        let AstKind::MemberExpression(member_expression) = node.kind() else {
+            return;
+        };
         if let Some(static_property_name) = member_expression.static_property_name() {
             if static_property_name == "__proto__" {
-                ctx.diagnostic(NoProtoDiagnostic(Span::new(
+                ctx.diagnostic(no_proto_diagnostic(Span::new(
                     member_expression.span().start,
                     member_expression.span().end,
                 )));
@@ -73,5 +77,5 @@ fn test() {
         "test[`__proto__`] = function () {};",
     ];
 
-    Tester::new(NoProto::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoProto::NAME, NoProto::PLUGIN, pass, fail).test_and_snapshot();
 }

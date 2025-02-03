@@ -1,19 +1,13 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{CompactStr, Span};
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-global-assign): Read-only global '{0}' should not be modified.")]
-#[diagnostic(severity(warning))]
-struct NoGlobalAssignDiagnostic(
-    CompactStr,
-    #[label("Read-only global '{0}' should not be modified.")] pub Span,
-);
+fn no_global_assign_diagnostic(global_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Read-only global '{global_name}' should not be modified."))
+        .with_label(span.label(format!("Read-only global '{global_name}' should not be modified.")))
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoGlobalAssign(Box<NoGlobalAssignConfig>);
@@ -43,6 +37,7 @@ declare_oxc_lint!(
     /// Object = null
     /// ```
     NoGlobalAssign,
+    eslint,
     correctness
 );
 
@@ -57,23 +52,25 @@ impl Rule for NoGlobalAssign {
                 .unwrap_or(&vec![])
                 .iter()
                 .map(serde_json::Value::as_str)
-                .filter(std::option::Option::is_some)
-                .map(|x| CompactStr::from(x.unwrap()))
+                .filter(Option::is_some)
+                .map(|x| x.unwrap().into())
                 .collect::<Vec<CompactStr>>(),
         }))
     }
 
     fn run_once(&self, ctx: &LintContext) {
         let symbol_table = ctx.symbols();
-        for reference_id_list in ctx.scopes().root_unresolved_references().values() {
+        for (name, reference_id_list) in ctx.scopes().root_unresolved_references() {
             for &reference_id in reference_id_list {
                 let reference = symbol_table.get_reference(reference_id);
-                if reference.is_write() && symbol_table.is_global_reference(reference_id) {
-                    let name = reference.name();
-
-                    if !self.excludes.contains(name) && ctx.env_contains_var(name) {
-                        ctx.diagnostic(NoGlobalAssignDiagnostic(name.clone(), reference.span()));
-                    }
+                if reference.is_write()
+                    && !self.excludes.iter().any(|n| n == name)
+                    && ctx.env_contains_var(name)
+                {
+                    ctx.diagnostic(no_global_assign_diagnostic(
+                        name,
+                        ctx.semantic().reference_span(reference),
+                    ));
                 }
             }
         }
@@ -109,5 +106,5 @@ fn test() {
         ("Array = 1;", None),
     ];
 
-    Tester::new(NoGlobalAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoGlobalAssign::NAME, NoGlobalAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

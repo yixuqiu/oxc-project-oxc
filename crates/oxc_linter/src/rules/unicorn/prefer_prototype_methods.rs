@@ -1,8 +1,5 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
@@ -11,17 +8,17 @@ use crate::{
     context::LintContext,
     rule::Rule,
     utils::{is_empty_array_expression, is_empty_object_expression},
-    AstNode, Fix,
+    AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferPrototypeMethodsDiagnostic {
-    #[error("eslint-plugin-unicorn(prefer-prototype-methods): Prefer using `{1}.prototype.{2}`.")]
-    #[diagnostic(severity(warning))]
-    KnownMethod(#[label] Span, &'static str, String),
-    #[error("eslint-plugin-unicorn(prefer-prototype-methods): Prefer using method from `{1}.prototype`.")]
-    #[diagnostic(severity(warning))]
-    UnknownMethod(#[label] Span, &'static str),
+fn known_method(span: Span, obj_name: &str, method_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer using `{obj_name}.prototype.{method_name}`."))
+        .with_label(span)
+}
+
+fn unknown_method(span: Span, obj_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer using method from `{obj_name}.prototype`."))
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -29,36 +26,45 @@ pub struct PreferPrototypeMethods;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// This rule prefers borrowing methods from the prototype instead of the instance.
     ///
     /// ### Why is this bad?
+    ///
     /// “Borrowing” a method from an instance of `Array` or `Object` is less clear than getting it from the corresponding prototype.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Fail
     /// const array = [].slice.apply(bar);
     /// const type = {}.toString.call(foo);
     /// Reflect.apply([].forEach, arrayLike, [callback]);
+    /// ```
     ///
-    /// // Pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const array = Array.prototype.slice.apply(bar);
     /// const type = Object.prototype.toString.call(foo);
     /// Reflect.apply(Array.prototype.forEach, arrayLike, [callback]);
     /// const maxValue = Math.max.apply(Math, numbers);
     /// ```
     PreferPrototypeMethods,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for PreferPrototypeMethods {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
         if call_expr.optional {
             return;
         }
-        match call_expr.callee.without_parenthesized() {
+        match call_expr.callee.without_parentheses() {
             Expression::StaticMemberExpression(member_expr) if !member_expr.optional => {}
             Expression::PrivateFieldExpression(member_expr) if !member_expr.optional => {}
             _ => return,
@@ -70,7 +76,7 @@ impl Rule for PreferPrototypeMethods {
         // `Reflect.apply({}.foo, …)`
         if is_method_call(call_expr, Some(&["Reflect"]), Some(&["apply"]), Some(1), None) {
             if let Some(argument_expr) = call_expr.arguments[0].as_expression() {
-                method_expr = Some(argument_expr.without_parenthesized());
+                method_expr = Some(argument_expr.without_parentheses());
             }
         }
         // `[].foo.{apply,bind,call}(…)`
@@ -79,12 +85,16 @@ impl Rule for PreferPrototypeMethods {
             method_expr = call_expr
                 .callee
                 .get_member_expr()
-                .map(|member_expr| member_expr.object().without_parenthesized());
+                .map(|member_expr| member_expr.object().without_parentheses());
         }
 
-        let Some(method_expr) = method_expr else { return };
-        let Some(method_expr) = method_expr.as_member_expression() else { return };
-        let object_expr = method_expr.object().without_parenthesized();
+        let Some(method_expr) = method_expr else {
+            return;
+        };
+        let Some(method_expr) = method_expr.as_member_expression() else {
+            return;
+        };
+        let object_expr = method_expr.object().without_parentheses();
 
         if !is_empty_array_expression(object_expr) && !is_empty_object_expression(object_expr) {
             return;
@@ -101,31 +111,20 @@ impl Rule for PreferPrototypeMethods {
 
         ctx.diagnostic_with_fix(
             method_name.map_or_else(
-                || {
-                    PreferPrototypeMethodsDiagnostic::UnknownMethod(
-                        method_expr.span(),
-                        constructor_name,
-                    )
-                },
-                |method_name| {
-                    PreferPrototypeMethodsDiagnostic::KnownMethod(
-                        method_expr.span(),
-                        constructor_name,
-                        method_name.into(),
-                    )
-                },
+                || unknown_method(method_expr.span(), constructor_name),
+                |method_name| known_method(method_expr.span(), constructor_name, method_name),
             ),
-            || {
+            |fixer| {
                 let span = object_expr.span();
                 let need_padding = span.start >= 1
                     && ctx.source_text().as_bytes()[span.start as usize - 1].is_ascii_alphabetic();
-                Fix::new(
+                fixer.replace(
+                    span,
                     format!(
                         "{}{}.prototype",
                         if need_padding { " " } else { "" },
                         constructor_name
                     ),
-                    span,
                 )
             },
         );
@@ -284,5 +283,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(PreferPrototypeMethods::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(PreferPrototypeMethods::NAME, PreferPrototypeMethods::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

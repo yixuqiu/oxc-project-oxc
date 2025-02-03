@@ -1,18 +1,14 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::UnaryOperator;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-undef): Disallow the use of undeclared variables.")]
-#[diagnostic(severity(warning), help("'{0}' is not defined."))]
-struct NoUndefDiagnostic(CompactStr, #[label] pub Span);
+fn no_undef_diagnostic(name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("'{name}' is not defined.")).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUndef {
@@ -35,6 +31,7 @@ declare_oxc_lint!(
     /// var bar = a + 1;
     /// ```
     NoUndef,
+    eslint,
     nursery
 );
 
@@ -51,16 +48,21 @@ impl Rule for NoUndef {
     fn run_once(&self, ctx: &LintContext) {
         let symbol_table = ctx.symbols();
 
-        for reference_id_list in ctx.scopes().root_unresolved_references().values() {
-            for &reference_id in reference_id_list {
+        for reference_id_list in ctx.scopes().root_unresolved_references_ids() {
+            for reference_id in reference_id_list {
                 let reference = symbol_table.get_reference(reference_id);
-                let name = reference.name();
+
+                if reference.is_type() {
+                    return;
+                }
+
+                let name = ctx.semantic().reference_name(reference);
 
                 if ctx.env_contains_var(name) {
                     continue;
                 }
 
-                if ctx.globals().is_enabled(name.as_str()) {
+                if ctx.globals().is_enabled(name) {
                     continue;
                 }
 
@@ -69,14 +71,14 @@ impl Rule for NoUndef {
                     continue;
                 }
 
-                ctx.diagnostic(NoUndefDiagnostic(name.clone(), reference.span()));
+                ctx.diagnostic(no_undef_diagnostic(name, node.kind().span()));
             }
         }
     }
 }
 
 fn has_typeof_operator(node: &AstNode<'_>, ctx: &LintContext<'_>) -> bool {
-    ctx.nodes().parent_node(node.id()).map_or(false, |parent| match parent.kind() {
+    ctx.nodes().parent_node(node.id()).is_some_and(|parent| match parent.kind() {
         AstKind::UnaryExpression(expr) => expr.operator == UnaryOperator::Typeof,
         AstKind::ParenthesizedExpression(_) => has_typeof_operator(parent, ctx),
         _ => false,
@@ -100,8 +102,6 @@ fn test() {
         // "/*eslint-env browser*/ window;",
         // "/*eslint-env node*/ require(\"a\");",
         "Object; isNaN();",
-        "toString()",
-        "hasOwnProperty()",
         "function evilEval(stuffToEval) { var ultimateAnswer; ultimateAnswer = 42; eval(stuffToEval); }",
         "typeof a",
         "typeof (a)",
@@ -157,7 +157,11 @@ fn test() {
         "class C { static { let a; a; } }",
         "class C { static { a; let a; } }",
         "class C { static { function a() {} a; } }",
-        "class C { static { a; function a() {} } }"
+        "class C { static { a; function a() {} } }",
+        "String;Array;Boolean;",
+        "function resolve<T>(path: string): T { return { path } as T; }",
+        "let xyz: NodeListOf<HTMLElement>",
+        "type Foo = Record<string, unknown>;",
     ];
 
     let fail = vec![
@@ -186,9 +190,11 @@ fn test() {
         "class C { static { let a; } [a]; }",
         "class C { static { function a() {} } [a]; }",
         "class C { static { var a; } } a;",
+        "toString()",
+        "hasOwnProperty()",
     ];
 
-    Tester::new(NoUndef::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUndef::NAME, NoUndef::PLUGIN, pass, fail).test_and_snapshot();
 
     let pass = vec![];
     let fail = vec![(
@@ -196,10 +202,10 @@ fn test() {
         Some(serde_json::json!([{ "typeof": true }])),
     )];
 
-    Tester::new(NoUndef::NAME, pass, fail).test();
+    Tester::new(NoUndef::NAME, NoUndef::PLUGIN, pass, fail).test();
 
     let pass = vec![("foo", None, Some(serde_json::json!({ "globals": { "foo": "readonly" } })))];
     let fail = vec![("foo", None, Some(serde_json::json!({ "globals": { "foo": "off" } })))];
 
-    Tester::new(NoUndef::NAME, pass, fail).test();
+    Tester::new(NoUndef::NAME, NoUndef::PLUGIN, pass, fail).test();
 }

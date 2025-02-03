@@ -1,39 +1,40 @@
 use oxc_ast::{ast::Argument, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferDomNodeDatasetDiagnostic {
-    #[error("eslint-plugin-unicorn(prefer-dom-node-dataset): Prefer using `dataset` over `setAttribute`.")]
-    #[diagnostic(
-        severity(warning),
-        help("Access the `.dataset` object directly: `element.dataset.{1} = ...;`")
-    )]
-    Set(#[label] Span, String),
-    #[error("eslint-plugin-unicorn(prefer-dom-node-dataset): Prefer using `dataset` over `getAttribute`.")]
-    #[diagnostic(
-        severity(warning),
-        help("Access the `.dataset` object directly: `element.dataset.{1}`")
-    )]
-    Get(#[label] Span, String),
-    #[error("eslint-plugin-unicorn(prefer-dom-node-dataset): Prefer using `dataset` over `hasAttribute`.")]
-    #[diagnostic(
-        severity(warning),
-        help("Check the `dataset` object directly: `Object.hasOwn(element.dataset, '{1}')")
-    )]
-    Has(#[label] Span, String),
-    #[error("eslint-plugin-unicorn(prefer-dom-node-dataset): Prefer using `dataset` over `removeAttribute`.")]
-    #[diagnostic(
-        severity(warning),
-        help("Access the `.dataset` object directly: `delete element.dataset.{1};")
-    )]
-    Remove(#[label] Span, String),
+fn set(span: Span, method_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer using `dataset` over `setAttribute`.")
+        .with_help(format!(
+            "Access the `.dataset` object directly: `element.dataset.{method_name} = ...;`"
+        ))
+        .with_label(span)
+}
+
+fn get(span: Span, method_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer using `dataset` over `getAttribute`.")
+        .with_help(format!(
+            "Access the `.dataset` object directly: `element.dataset.{method_name}`"
+        ))
+        .with_label(span)
+}
+
+fn has(span: Span, method_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer using `dataset` over `hasAttribute`.")
+        .with_help(format!(
+            "Check the `dataset` object directly: `Object.hasOwn(element.dataset, '{method_name}')"
+        ))
+        .with_label(span)
+}
+
+fn remove(span: Span, method_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer using `dataset` over `removeAttribute`.")
+        .with_help(format!(
+            "Access the `.dataset` object directly: `delete element.dataset.{method_name};"
+        ))
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -49,15 +50,20 @@ declare_oxc_lint!(
     /// The `dataset` property is a map of strings that contains all the `data-*` attributes from the element. It is a convenient way to access all of them at once.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// element.setAttribute('data-unicorn', '🦄');
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// element.setAttribute('data-unicorn', '🦄');
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// element.dataset.unicorn = '🦄';
     /// ```
     PreferDomNodeDataset,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for PreferDomNodeDataset {
@@ -66,13 +72,17 @@ impl Rule for PreferDomNodeDataset {
             return;
         };
 
-        let Some(member_expr) = call_expr.callee.get_member_expr() else { return };
+        let Some(member_expr) = call_expr.callee.get_member_expr() else {
+            return;
+        };
 
         if member_expr.is_computed() {
             return;
         }
 
-        let Some((span, method_name)) = member_expr.static_property_info() else { return };
+        let Some((span, method_name)) = member_expr.static_property_info() else {
+            return;
+        };
 
         match method_name {
             "setAttribute" => {
@@ -98,19 +108,16 @@ impl Rule for PreferDomNodeDataset {
 
         match method_name {
             "setAttribute" => {
-                ctx.diagnostic(PreferDomNodeDatasetDiagnostic::Set(span, dataset_property_name));
+                ctx.diagnostic(set(span, dataset_property_name));
             }
             "getAttribute" => {
-                ctx.diagnostic(PreferDomNodeDatasetDiagnostic::Get(span, dataset_property_name));
+                ctx.diagnostic(get(span, dataset_property_name));
             }
 
-            "removeAttribute" => ctx.diagnostic(PreferDomNodeDatasetDiagnostic::Remove(
-                string_lit.span,
-                dataset_property_name,
-            )),
+            "removeAttribute" => ctx.diagnostic(remove(string_lit.span, dataset_property_name)),
 
             "hasAttribute" => {
-                ctx.diagnostic(PreferDomNodeDatasetDiagnostic::Has(span, dataset_property_name));
+                ctx.diagnostic(has(span, dataset_property_name));
             }
 
             _ => unreachable!(),
@@ -118,13 +125,8 @@ impl Rule for PreferDomNodeDataset {
     }
 }
 
-fn strip_data_prefix(s: &str) -> Option<String> {
-    let prefix = "data-";
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(s[prefix.len()..].to_string())
-    } else {
-        None
-    }
+fn strip_data_prefix(s: &str) -> Option<&str> {
+    s.strip_prefix("data-").or_else(|| s.strip_prefix("DATA-"))
 }
 
 #[test]
@@ -190,6 +192,7 @@ fn test() {
         r"element.getAttribute(0);",
         r#"element.getAttribute("foo-unicorn");"#,
         r#"element.getAttribute("data");"#,
+        r#"element.getAttribute("stylý");"#,
     ];
 
     let fail = vec![
@@ -255,5 +258,6 @@ fn test() {
         r#"element.getAttribute("data-unicorn").toString()"#,
     ];
 
-    Tester::new(PreferDomNodeDataset::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferDomNodeDataset::NAME, PreferDomNodeDataset::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

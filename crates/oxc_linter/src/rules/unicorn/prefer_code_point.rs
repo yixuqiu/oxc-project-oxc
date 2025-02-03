@@ -1,17 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-code-point): Prefer `{1}` over `{2}`")]
-#[diagnostic(severity(warning), help("Unicode is better supported in `{1}` than `{2}`"))]
-struct PreferCodePointDiagnostic(#[label] pub Span, pub &'static str, pub &'static str);
+fn prefer_code_point_diagnostic(span: Span, good_method: &str, bad_method: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer `{good_method}` over `{bad_method}`"))
+        .with_help(format!("Unicode is better supported in `{good_method}` than `{bad_method}`"))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferCodePoint;
@@ -28,25 +26,34 @@ declare_oxc_lint!(
     ///
     /// [Difference between `String.fromCodePoint()` and `String.fromCharCode()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCodePoint#compared_to_fromcharcode)
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// '🦄'.charCodeAt(0);
     /// String.fromCharCode(0x1f984);
+    /// ```
     ///
-    /// // good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// '🦄'.codePointAt(0);
     /// String.fromCodePoint(0x1f984);
     /// ```
     PreferCodePoint,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for PreferCodePoint {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
-        let Some(memb_expr) = call_expr.callee.as_member_expression() else { return };
+        let Some(memb_expr) = call_expr.callee.as_member_expression() else {
+            return;
+        };
 
         if memb_expr.is_computed() || memb_expr.optional() || call_expr.optional {
             return;
@@ -58,7 +65,10 @@ impl Rule for PreferCodePoint {
             _ => return,
         };
 
-        ctx.diagnostic(PreferCodePointDiagnostic(span, replacement, current));
+        ctx.diagnostic_with_fix(
+            prefer_code_point_diagnostic(span, replacement, current),
+            |fixer| fixer.replace(span, replacement),
+        );
     }
 }
 
@@ -96,5 +106,17 @@ fn test() {
         r"(( (( String )).fromCharCode( ((code)), ) ))",
     ];
 
-    Tester::new(PreferCodePoint::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (r"string.charCodeAt(index)", r"string.codePointAt(index)"),
+        (
+            r"(( (( String )).fromCharCode( ((code)), ) ))",
+            r"(( (( String )).fromCodePoint( ((code)), ) ))",
+        ),
+        (r#""🦄".charCodeAt(0)"#, r#""🦄".codePointAt(0)"#),
+        (r"String.fromCharCode(0x1f984);", r"String.fromCodePoint(0x1f984);"),
+    ];
+
+    Tester::new(PreferCodePoint::NAME, PreferCodePoint::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

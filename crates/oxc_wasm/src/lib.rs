@@ -1,71 +1,80 @@
-// Silence erroneous warnings from Rust Analyser for `#[derive(Tsify)]`
-#![allow(non_snake_case)]
-
-mod options;
-
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
-
-use oxc::{
-    allocator::Allocator,
-    ast::{CommentKind, Trivias},
-    codegen::{Codegen, CodegenOptions},
-    diagnostics::Error,
-    minifier::{CompressOptions, Minifier, MinifierOptions},
-    parser::Parser,
-    semantic::{ScopeId, Semantic, SemanticBuilder},
-    span::SourceType,
-    transformer::{TransformOptions, Transformer},
+use std::{
+    cell::{Cell, RefCell},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
 };
-use oxc_linter::{LintContext, Linter};
-use oxc_prettier::{Prettier, PrettierOptions};
+
 use serde::Serialize;
 use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
-use crate::options::{
-    OxcCodegenOptions, OxcLinterOptions, OxcMinifierOptions, OxcParserOptions, OxcRunOptions,
+use oxc::{
+    allocator::Allocator,
+    ast::{ast::Program, Comment as OxcComment, CommentKind, Visit},
+    codegen::{CodeGenerator, CodegenOptions},
+    minifier::{CompressOptions, MangleOptions, Minifier, MinifierOptions},
+    parser::{ParseOptions, Parser, ParserReturn},
+    semantic::{
+        dot::{DebugDot, DebugDotContext},
+        ReferenceId, ScopeFlags, ScopeId, ScopeTree, SemanticBuilder, SymbolFlags, SymbolTable,
+    },
+    span::{SourceType, Span},
+    syntax::reference::Reference,
+    transformer::{TransformOptions, Transformer},
 };
+use oxc_index::Idx;
+use oxc_linter::{ConfigStoreBuilder, LintOptions, Linter, ModuleRecord};
+use oxc_prettier::{Prettier, PrettierOptions};
+
+use crate::options::{OxcOptions, OxcRunOptions};
+
+mod options;
+
+#[wasm_bindgen::prelude::wasm_bindgen(typescript_custom_section)]
+const TS_APPEND_CONTENT: &'static str = r#"
+import type { Program, Span } from "@oxc-project/types";
+export * from "@oxc-project/types";
+"#;
 
 #[wasm_bindgen(getter_with_clone)]
 #[derive(Default, Tsify)]
+#[serde(rename_all = "camelCase")]
 pub struct Oxc {
-    source_text: String,
-
     #[wasm_bindgen(readonly, skip_typescript)]
     #[tsify(type = "Program")]
     pub ast: JsValue,
 
     #[wasm_bindgen(readonly, skip_typescript)]
-    #[tsify(type = "Statement[]")]
-    pub ir: JsValue,
+    pub ir: String,
+
+    #[wasm_bindgen(readonly, skip_typescript, js_name = "controlFlowGraph")]
+    pub control_flow_graph: String,
 
     #[wasm_bindgen(readonly, skip_typescript)]
-    #[tsify(type = "SymbolTable")]
+    #[tsify(type = "any")]
     pub symbols: JsValue,
 
     #[wasm_bindgen(readonly, skip_typescript, js_name = "scopeText")]
-    #[serde(rename = "scopeText")]
     pub scope_text: String,
 
     #[wasm_bindgen(readonly, skip_typescript, js_name = "codegenText")]
-    #[serde(rename = "codegenText")]
     pub codegen_text: String,
 
     #[wasm_bindgen(readonly, skip_typescript, js_name = "formattedText")]
-    #[serde(rename = "formattedText")]
     pub formatted_text: String,
 
     #[wasm_bindgen(readonly, skip_typescript, js_name = "prettierFormattedText")]
-    #[serde(rename = "prettierFormattedText")]
     pub prettier_formatted_text: String,
 
     #[wasm_bindgen(readonly, skip_typescript, js_name = "prettierIrText")]
-    #[serde(rename = "prettierIrText")]
     pub prettier_ir_text: String,
 
+    #[serde(skip)]
     comments: Vec<Comment>,
 
-    diagnostics: RefCell<Vec<Error>>,
+    #[serde(skip)]
+    diagnostics: RefCell<Vec<oxc::diagnostics::OxcDiagnostic>>,
 
     #[serde(skip)]
     serializer: serde_wasm_bindgen::Serializer,
@@ -99,18 +108,8 @@ pub struct OxcDiagnostic {
 impl Oxc {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
+        console_error_panic_hook::set_once();
         Self { serializer: serde_wasm_bindgen::Serializer::json_compatible(), ..Self::default() }
-    }
-
-    #[wasm_bindgen(getter = sourceText)]
-    pub fn source_text(&self) -> String {
-        self.source_text.clone()
-    }
-
-    #[wasm_bindgen(setter = sourceText)]
-    pub fn set_source_text(&mut self, source_text: String) {
-        self.diagnostics = RefCell::default();
-        self.source_text = source_text;
     }
 
     /// Returns Array of String
@@ -122,21 +121,24 @@ impl Oxc {
             .diagnostics
             .borrow()
             .iter()
-            .flat_map(|error| {
-                let Some(labels) = error.labels() else { return vec![] };
-                labels
-                    .map(|label| {
-                        OxcDiagnostic {
-                            start: label.offset(),
-                            end: label.offset() + label.len(),
-                            severity: format!("{:?}", error.severity().unwrap_or_default()),
-                            message: format!("{error}"),
-                        }
-                        .serialize(&self.serializer)
-                        .unwrap()
+            .flat_map(|error| match &error.labels {
+                Some(labels) => labels
+                    .iter()
+                    .map(|label| OxcDiagnostic {
+                        start: label.offset(),
+                        end: label.offset() + label.len(),
+                        severity: format!("{:?}", error.severity),
+                        message: format!("{error}"),
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>(),
+                None => vec![OxcDiagnostic {
+                    start: 0,
+                    end: 0,
+                    severity: format!("{:?}", error.severity),
+                    message: format!("{error}"),
+                }],
             })
+            .map(|v| v.serialize(&self.serializer).unwrap())
             .collect::<Vec<_>>())
     }
 
@@ -152,188 +154,316 @@ impl Oxc {
     #[wasm_bindgen]
     pub fn run(
         &mut self,
-        run_options: &OxcRunOptions,
-        parser_options: &OxcParserOptions,
-        _linter_options: &OxcLinterOptions,
-        codegen_options: &OxcCodegenOptions,
-        minifier_options: &OxcMinifierOptions,
+        source_text: &str,
+        options: OxcOptions,
     ) -> Result<(), serde_wasm_bindgen::Error> {
         self.diagnostics = RefCell::default();
 
+        let OxcOptions {
+            run: run_options,
+            parser: parser_options,
+            linter: linter_options,
+            transformer: transform_options,
+            codegen: codegen_options,
+            minifier: minifier_options,
+            control_flow: control_flow_options,
+        } = options;
+        let run_options = run_options.unwrap_or_default();
+        let parser_options = parser_options.unwrap_or_default();
+        let _linter_options = linter_options.unwrap_or_default();
+        let minifier_options = minifier_options.unwrap_or_default();
+        let _codegen_options = codegen_options.unwrap_or_default();
+        let transform_options = transform_options.unwrap_or_default();
+        let control_flow_options = control_flow_options.unwrap_or_default();
+
         let allocator = Allocator::default();
-        let source_text = &self.source_text;
+
         let path = PathBuf::from(
             parser_options.source_filename.clone().unwrap_or_else(|| "test.tsx".to_string()),
         );
         let source_type = SourceType::from_path(&path).unwrap_or_default();
+        let source_type = match parser_options.source_type.as_deref() {
+            Some("script") => source_type.with_script(true),
+            Some("module") => source_type.with_module(true),
+            _ => source_type,
+        };
 
-        let ret = Parser::new(&allocator, source_text, source_type)
-            .allow_return_outside_function(parser_options.allow_return_outside_function)
-            .parse();
+        let default_parser_options = ParseOptions::default();
+        let oxc_parser_options = ParseOptions {
+            parse_regular_expression: true,
+            allow_return_outside_function: parser_options
+                .allow_return_outside_function
+                .unwrap_or(default_parser_options.allow_return_outside_function),
+            preserve_parens: parser_options
+                .preserve_parens
+                .unwrap_or(default_parser_options.preserve_parens),
+        };
+        let ParserReturn { mut program, errors, module_record, .. } =
+            Parser::new(&allocator, source_text, source_type)
+                .with_options(oxc_parser_options)
+                .parse();
 
-        self.comments = self.map_comments(&ret.trivias);
-        self.save_diagnostics(ret.errors);
-
-        self.ir = format!("{:#?}", ret.program.body).into();
-
-        let program = allocator.alloc(ret.program);
-
-        let semantic_ret = SemanticBuilder::new(source_text, source_type)
-            .with_trivias(ret.trivias)
-            .with_check_syntax_error(true)
-            .build(program);
-
-        if run_options.syntax() {
-            self.save_diagnostics(semantic_ret.errors);
-        }
-
-        let semantic = Rc::new(semantic_ret.semantic);
-        // Only lint if there are not syntax errors
-        if run_options.lint() && self.diagnostics.borrow().is_empty() {
-            let lint_ctx = LintContext::new(path.clone().into_boxed_path(), &semantic);
-            let linter_ret = Linter::default().run(lint_ctx);
-            let diagnostics = linter_ret.into_iter().map(|e| e.error).collect();
-            self.save_diagnostics(diagnostics);
-        }
-
+        self.comments = Self::map_comments(source_text, &program.comments);
+        self.ir = format!("{:#?}", program.body);
         self.ast = program.serialize(&self.serializer)?;
 
-        if run_options.prettier_format() {
-            let ret = Parser::new(&allocator, source_text, source_type)
-                .allow_return_outside_function(parser_options.allow_return_outside_function)
-                .preserve_parens(false)
-                .parse();
-            let printed =
-                Prettier::new(&allocator, source_text, &ret.trivias, PrettierOptions::default())
-                    .build(&ret.program);
-            self.prettier_formatted_text = printed;
+        let mut semantic_builder = SemanticBuilder::new();
+        if run_options.transform.unwrap_or_default() {
+            // Estimate transformer will triple scopes, symbols, references
+            semantic_builder = semantic_builder.with_excess_capacity(2.0);
+        }
+        let semantic_ret =
+            semantic_builder.with_check_syntax_error(true).with_cfg(true).build(&program);
+        let semantic = semantic_ret.semantic;
+
+        self.control_flow_graph = semantic.cfg().map_or_else(String::default, |cfg| {
+            cfg.debug_dot(DebugDotContext::new(
+                semantic.nodes(),
+                control_flow_options.verbose.unwrap_or_default(),
+            ))
+        });
+        if run_options.syntax.unwrap_or_default() {
+            self.save_diagnostics(
+                errors.into_iter().chain(semantic_ret.errors).collect::<Vec<_>>(),
+            );
         }
 
-        if run_options.prettier_ir() {
-            let ret = Parser::new(&allocator, source_text, source_type)
-                .allow_return_outside_function(parser_options.allow_return_outside_function)
-                .preserve_parens(false)
-                .parse();
-            let prettier_doc =
-                Prettier::new(&allocator, source_text, &ret.trivias, PrettierOptions::default())
-                    .doc(&ret.program)
-                    .to_string();
-            self.prettier_ir_text = {
-                let ret = Parser::new(&allocator, &prettier_doc, SourceType::default()).parse();
-                Prettier::new(&allocator, &prettier_doc, &ret.trivias, PrettierOptions::default())
-                    .build(&ret.program)
-            };
-        }
+        let module_record = Arc::new(ModuleRecord::new(&path, &module_record, &semantic));
+        self.run_linter(&run_options, &path, &program, &module_record);
 
-        if run_options.transform() {
-            let options = TransformOptions::default();
-            let result = Transformer::new(
-                &allocator,
-                &path,
-                source_type,
-                source_text,
-                semantic.trivias(),
-                options,
-            )
-            .build(program);
-            if let Err(errs) = result {
-                self.save_diagnostics(errs);
+        self.run_prettier(&run_options, source_text, source_type);
+
+        let (symbols, scopes) = semantic.into_symbol_table_and_scope_tree();
+
+        if !source_type.is_typescript_definition() {
+            if run_options.scope.unwrap_or_default() {
+                self.scope_text = Self::get_scope_text(&program, &symbols, &scopes);
+            }
+            if run_options.symbol.unwrap_or_default() {
+                self.symbols = self.get_symbols_text(&symbols)?;
             }
         }
 
-        if run_options.scope() || run_options.symbol() {
-            let semantic = SemanticBuilder::new(source_text, source_type)
-                .build_module_record(PathBuf::new(), program)
-                .build(program)
-                .semantic;
-            if run_options.scope() {
-                self.scope_text = Self::get_scope_text(&semantic);
-            } else if run_options.symbol() {
-                self.symbols = semantic.symbols().serialize(&self.serializer)?;
+        if run_options.transform.unwrap_or_default() {
+            let options = transform_options
+                .target
+                .as_ref()
+                .and_then(|target| {
+                    TransformOptions::from_target(target)
+                        .map_err(|err| {
+                            self.save_diagnostics(vec![oxc::diagnostics::OxcDiagnostic::error(
+                                err,
+                            )]);
+                        })
+                        .ok()
+                })
+                .unwrap_or_default();
+            let result = Transformer::new(&allocator, &path, &options)
+                .build_with_symbols_and_scopes(symbols, scopes, &mut program);
+            if !result.errors.is_empty() {
+                self.save_diagnostics(result.errors.into_iter().collect::<Vec<_>>());
             }
         }
 
-        let program = allocator.alloc(program);
-
-        if minifier_options.compress() || minifier_options.mangle() {
+        let symbol_table = if minifier_options.compress.unwrap_or_default()
+            || minifier_options.mangle.unwrap_or_default()
+        {
+            let compress_options = minifier_options.compress_options.unwrap_or_default();
             let options = MinifierOptions {
-                mangle: minifier_options.mangle(),
-                compress: if minifier_options.compress() {
-                    CompressOptions::default()
+                mangle: minifier_options.mangle.unwrap_or_default().then(MangleOptions::default),
+                compress: Some(if minifier_options.compress.unwrap_or_default() {
+                    CompressOptions {
+                        drop_console: compress_options.drop_console,
+                        drop_debugger: compress_options.drop_debugger,
+                        ..CompressOptions::all_false()
+                    }
                 } else {
                     CompressOptions::all_false()
-                },
+                }),
             };
-            Minifier::new(options).build(&allocator, program);
-        }
-
-        let codegen_options = CodegenOptions {
-            enable_typescript: codegen_options.enable_typescript,
-            ..CodegenOptions::default()
-        };
-        self.codegen_text = if minifier_options.whitespace() {
-            Codegen::<true>::new("", source_text, codegen_options).build(program).source_text
+            Minifier::new(options).build(&allocator, &mut program).symbol_table
         } else {
-            Codegen::<false>::new("", source_text, codegen_options).build(program).source_text
+            None
         };
+
+        self.codegen_text = CodeGenerator::new()
+            .with_symbol_table(symbol_table)
+            .with_options(CodegenOptions {
+                minify: minifier_options.whitespace.unwrap_or_default(),
+                ..CodegenOptions::default()
+            })
+            .build(&program)
+            .code;
 
         Ok(())
     }
 
-    fn get_scope_text(semantic: &Semantic) -> String {
-        fn write_scope_text(
-            semantic: &Semantic,
-            scope_text: &mut String,
-            depth: usize,
-            scope_ids: &Vec<ScopeId>,
-        ) {
-            let space = " ".repeat(depth * 2);
+    fn run_linter(
+        &mut self,
+        run_options: &OxcRunOptions,
+        path: &Path,
+        program: &Program,
+        module_record: &Arc<ModuleRecord>,
+    ) {
+        // Only lint if there are no syntax errors
+        if run_options.lint.unwrap_or_default() && self.diagnostics.borrow().is_empty() {
+            let semantic_ret = SemanticBuilder::new().with_cfg(true).build(program);
+            let semantic = Rc::new(semantic_ret.semantic);
+            let lint_config =
+                ConfigStoreBuilder::default().build().expect("Failed to build config store");
+            let linter_ret = Linter::new(LintOptions::default(), lint_config).run(
+                path,
+                Rc::clone(&semantic),
+                Arc::clone(module_record),
+            );
+            let diagnostics = linter_ret.into_iter().map(|e| e.error).collect();
+            self.save_diagnostics(diagnostics);
+        }
+    }
 
-            for scope_id in scope_ids {
-                let flag = semantic.scopes().get_flags(*scope_id);
-                let next_scope_ids = semantic.scopes().get_child_ids(*scope_id);
+    fn run_prettier(
+        &mut self,
+        run_options: &OxcRunOptions,
+        source_text: &str,
+        source_type: SourceType,
+    ) {
+        let allocator = Allocator::default();
+        if run_options.prettier_format.unwrap_or_default()
+            || run_options.prettier_ir.unwrap_or_default()
+        {
+            let ret = Parser::new(&allocator, source_text, source_type)
+                .with_options(ParseOptions { preserve_parens: false, ..ParseOptions::default() })
+                .parse();
 
-                scope_text.push_str(&format!("{space}Scope{:?} ({flag:?}) {{\n", *scope_id + 1));
-                let bindings = semantic.scopes().get_bindings(*scope_id);
-                let binding_space = " ".repeat((depth + 1) * 2);
-                if !bindings.is_empty() {
-                    scope_text.push_str(&format!("{binding_space}Bindings: {{"));
-                }
-                bindings.iter().for_each(|(name, symbol_id)| {
-                    let symbol_flag = semantic.symbols().get_flag(*symbol_id);
-                    scope_text.push_str(&format!("\n{binding_space}  {name} ({symbol_flag:?})",));
-                });
-                if !bindings.is_empty() {
-                    scope_text.push_str(&format!("\n{binding_space}}}\n"));
-                }
+            let mut prettier = Prettier::new(&allocator, PrettierOptions::default());
 
-                if let Some(next_scope_ids) = next_scope_ids {
-                    write_scope_text(semantic, scope_text, depth + 1, next_scope_ids);
+            if run_options.prettier_format.unwrap_or_default() {
+                self.prettier_formatted_text = prettier.build(&ret.program);
+            }
+
+            if run_options.prettier_ir.unwrap_or_default() {
+                let prettier_doc = prettier.doc(&ret.program).to_string();
+                self.prettier_ir_text = {
+                    let ret = Parser::new(&allocator, &prettier_doc, SourceType::default()).parse();
+                    Prettier::new(&allocator, PrettierOptions::default()).build(&ret.program)
+                };
+            }
+        }
+    }
+
+    fn get_scope_text(program: &Program<'_>, symbols: &SymbolTable, scopes: &ScopeTree) -> String {
+        struct ScopesTextWriter<'s> {
+            symbols: &'s SymbolTable,
+            scopes: &'s ScopeTree,
+            scope_text: String,
+            indent: usize,
+            space: String,
+        }
+
+        impl<'s> ScopesTextWriter<'s> {
+            fn new(symbols: &'s SymbolTable, scopes: &'s ScopeTree) -> Self {
+                Self { symbols, scopes, scope_text: String::new(), indent: 0, space: String::new() }
+            }
+
+            fn write_line<S: AsRef<str>>(&mut self, line: S) {
+                self.scope_text.push_str(&self.space[0..self.indent]);
+                self.scope_text.push_str(line.as_ref());
+                self.scope_text.push('\n');
+            }
+
+            fn indent_in(&mut self) {
+                self.indent += 2;
+                if self.space.len() < self.indent {
+                    self.space.push_str("  ");
                 }
-                scope_text.push_str(&format!("{space}}}\n"));
+            }
+
+            fn indent_out(&mut self) {
+                self.indent -= 2;
             }
         }
 
-        let mut scope_text = String::default();
-        write_scope_text(semantic, &mut scope_text, 0, &vec![semantic.scopes().root_scope_id()]);
-        scope_text
+        impl Visit<'_> for ScopesTextWriter<'_> {
+            fn enter_scope(&mut self, _: ScopeFlags, scope_id: &Cell<Option<ScopeId>>) {
+                let scope_id = scope_id.get().unwrap();
+                let flags = self.scopes.get_flags(scope_id);
+                self.write_line(format!("Scope {} ({flags:?}) {{", scope_id.index()));
+                self.indent_in();
+
+                let bindings = self.scopes.get_bindings(scope_id);
+                if !bindings.is_empty() {
+                    self.write_line("Bindings: {");
+                    for (name, &symbol_id) in bindings {
+                        let symbol_flags = self.symbols.get_flags(symbol_id);
+                        self.write_line(format!("  {name} ({symbol_id:?} {symbol_flags:?})",));
+                    }
+                    self.write_line("}");
+                }
+            }
+
+            fn leave_scope(&mut self) {
+                self.indent_out();
+                self.write_line("}");
+            }
+        }
+
+        let mut writer = ScopesTextWriter::new(symbols, scopes);
+        writer.visit_program(program);
+        writer.scope_text
     }
 
-    fn save_diagnostics(&self, diagnostics: Vec<Error>) {
+    fn get_symbols_text(
+        &self,
+        symbols: &SymbolTable,
+    ) -> Result<JsValue, serde_wasm_bindgen::Error> {
+        #[derive(Serialize)]
+        struct Data {
+            span: Span,
+            name: String,
+            flags: SymbolFlags,
+            scope_id: ScopeId,
+            resolved_references: Vec<ReferenceId>,
+            references: Vec<Reference>,
+        }
+
+        let data = symbols
+            .symbol_ids()
+            .map(|symbol_id| Data {
+                span: symbols.get_span(symbol_id),
+                name: symbols.get_name(symbol_id).into(),
+                flags: symbols.get_flags(symbol_id),
+                scope_id: symbols.get_scope_id(symbol_id),
+                resolved_references: symbols
+                    .get_resolved_reference_ids(symbol_id)
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                references: symbols
+                    .get_resolved_reference_ids(symbol_id)
+                    .iter()
+                    .map(|reference_id| symbols.get_reference(*reference_id).clone())
+                    .collect::<Vec<_>>(),
+            })
+            .collect::<Vec<_>>();
+
+        data.serialize(&self.serializer)
+    }
+
+    fn save_diagnostics(&self, diagnostics: Vec<oxc::diagnostics::OxcDiagnostic>) {
         self.diagnostics.borrow_mut().extend(diagnostics);
     }
 
-    fn map_comments(&self, trivias: &Trivias) -> Vec<Comment> {
-        trivias
-            .comments()
-            .map(|(kind, span)| Comment {
-                r#type: match kind {
-                    CommentKind::SingleLine => CommentType::Line,
-                    CommentKind::MultiLine => CommentType::Block,
+    fn map_comments(source_text: &str, comments: &[OxcComment]) -> Vec<Comment> {
+        comments
+            .iter()
+            .map(|comment| Comment {
+                r#type: match comment.kind {
+                    CommentKind::Line => CommentType::Line,
+                    CommentKind::Block => CommentType::Block,
                 },
-                value: span.source_text(&self.source_text).to_string(),
-                start: span.start,
-                end: span.end,
+                value: comment.content_span().source_text(source_text).to_string(),
+                start: comment.span.start,
+                end: comment.span.end,
             })
             .collect()
     }

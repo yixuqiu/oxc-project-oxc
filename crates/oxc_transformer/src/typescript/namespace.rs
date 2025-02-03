@@ -1,325 +1,317 @@
-use rustc_hash::FxHashSet;
+use oxc_allocator::{Box as ArenaBox, Vec as ArenaVec};
+use oxc_ast::{ast::*, NONE};
+use oxc_ecmascript::BoundNames;
+use oxc_semantic::Reference;
+use oxc_span::SPAN;
+use oxc_syntax::{
+    operator::{AssignmentOperator, LogicalOperator},
+    scope::{ScopeFlags, ScopeId},
+    symbol::SymbolFlags,
+};
+use oxc_traverse::{BoundIdentifier, Traverse, TraverseCtx};
 
-use super::TypeScript;
+use crate::TransformCtx;
 
-use oxc_allocator::{Box, Vec};
-use oxc_ast::{ast::*, syntax_directed_operations::BoundNames};
-use oxc_span::{Atom, SPAN};
-use oxc_syntax::operator::{AssignmentOperator, LogicalOperator};
+use super::{
+    diagnostics::{ambient_module_nested, namespace_exporting_non_const, namespace_not_supported},
+    TypeScriptOptions,
+};
 
-// TODO:
-// 1. register scope for the newly created function: <https://github.com/babel/babel/blob/08b0472069cd207f043dd40a4d157addfdd36011/packages/babel-plugin-transform-typescript/src/namespace.ts#L38>
-impl<'a> TypeScript<'a> {
+pub struct TypeScriptNamespace<'a, 'ctx> {
+    ctx: &'ctx TransformCtx<'a>,
+
+    // Options
+    allow_namespaces: bool,
+    only_remove_type_imports: bool,
+}
+
+impl<'a, 'ctx> TypeScriptNamespace<'a, 'ctx> {
+    pub fn new(options: &TypeScriptOptions, ctx: &'ctx TransformCtx<'a>) -> Self {
+        Self {
+            ctx,
+            allow_namespaces: options.allow_namespaces,
+            only_remove_type_imports: options.only_remove_type_imports,
+        }
+    }
+}
+
+impl<'a> Traverse<'a> for TypeScriptNamespace<'a, '_> {
     // `namespace Foo { }` -> `let Foo; (function (_Foo) { })(Foo || (Foo = {}));`
-    pub(super) fn transform_program_for_namespace(&self, program: &mut Program<'a>) {
+    fn enter_program(&mut self, program: &mut Program<'a>, ctx: &mut TraverseCtx<'a>) {
         // namespace declaration is only allowed at the top level
 
         if !has_namespace(program.body.as_slice()) {
             return;
         }
 
-        // Collect all binding names. Such as function name and class name.
-        let mut names: FxHashSet<Atom<'a>> = FxHashSet::default();
-
         // Recreate the statements vec for memory efficiency.
         // Inserting the `let` declaration multiple times will reallocate the whole statements vec
         // every time a namespace declaration is encountered.
-        let mut new_stmts = self.ctx.ast.new_vec();
+        let mut new_stmts = ctx.ast.vec();
 
-        for stmt in self.ctx.ast.move_statement_vec(&mut program.body) {
+        for stmt in ctx.ast.move_vec(&mut program.body) {
             match stmt {
                 Statement::TSModuleDeclaration(decl) => {
-                    if !decl.modifiers.is_contains_declare() {
-                        if let Some(transformed_stmt) =
-                            self.handle_nested(self.ctx.ast.copy(&decl).unbox(), None)
-                        {
-                            let name = decl.id.name();
-                            if names.insert(name.clone()) {
-                                new_stmts
-                                    .push(Statement::from(self.create_variable_declaration(name)));
-                            }
-                            new_stmts.push(transformed_stmt);
-                            continue;
-                        }
-                    }
-                    new_stmts.push(Statement::TSModuleDeclaration(decl));
-                }
-                match_module_declaration!(Statement) => {
-                    if let Statement::ExportNamedDeclaration(export_decl) = &stmt {
-                        if let Some(Declaration::TSModuleDeclaration(decl)) =
-                            &export_decl.declaration
-                        {
-                            if !decl.modifiers.is_contains_declare() {
-                                if let Some(transformed_stmt) =
-                                    self.handle_nested(self.ctx.ast.copy(decl), None)
-                                {
-                                    let name = decl.id.name();
-                                    if names.insert(name.clone()) {
-                                        let declaration = self.create_variable_declaration(name);
-                                        let export_named_decl = self
-                                            .ctx
-                                            .ast
-                                            .plain_export_named_declaration_declaration(
-                                                SPAN,
-                                                declaration,
-                                            );
-                                        let export_named_decl =
-                                            ModuleDeclaration::ExportNamedDeclaration(
-                                                export_named_decl,
-                                            );
-                                        let stmt =
-                                            self.ctx.ast.module_declaration(export_named_decl);
-                                        new_stmts.push(stmt);
-                                    }
-                                    new_stmts.push(transformed_stmt);
-                                    continue;
-                                }
-                            }
-                        }
+                    if !self.allow_namespaces {
+                        self.ctx.error(namespace_not_supported(decl.span));
                     }
 
-                    stmt.to_module_declaration().bound_names(&mut |id| {
-                        names.insert(id.name.clone());
-                    });
-                    new_stmts.push(stmt);
+                    self.handle_nested(decl, /* is_export */ false, &mut new_stmts, None, ctx);
+                    continue;
                 }
-                // Collect bindings from class, function, variable and enum declarations
-                Statement::FunctionDeclaration(ref decl) => {
-                    if let Some(ident) = &decl.id {
-                        names.insert(ident.name.clone());
+                Statement::ExportNamedDeclaration(export_decl) => {
+                    if export_decl.declaration.as_ref().map_or(true, |decl| {
+                        decl.declare() || !matches!(decl, Declaration::TSModuleDeclaration(_))
+                    }) {
+                        new_stmts.push(Statement::ExportNamedDeclaration(export_decl));
+                        continue;
                     }
-                    new_stmts.push(stmt);
-                }
-                Statement::ClassDeclaration(ref decl) => {
-                    if let Some(ident) = &decl.id {
-                        names.insert(ident.name.clone());
+
+                    let Some(Declaration::TSModuleDeclaration(decl)) =
+                        export_decl.unbox().declaration
+                    else {
+                        unreachable!()
+                    };
+
+                    if !self.allow_namespaces {
+                        self.ctx.error(namespace_not_supported(decl.span));
                     }
-                    new_stmts.push(stmt);
+
+                    self.handle_nested(decl, /* is_export */ true, &mut new_stmts, None, ctx);
+                    continue;
                 }
-                Statement::TSEnumDeclaration(ref decl) => {
-                    names.insert(decl.id.name.clone());
-                    new_stmts.push(stmt);
-                }
-                Statement::VariableDeclaration(ref decl) => {
-                    decl.bound_names(&mut |id| {
-                        names.insert(id.name.clone());
-                    });
-                    new_stmts.push(stmt);
-                }
-                _ => {
-                    new_stmts.push(stmt);
-                }
+                _ => {}
             }
+
+            new_stmts.push(stmt);
         }
 
         program.body = new_stmts;
     }
+}
 
+impl<'a> TypeScriptNamespace<'a, '_> {
     fn handle_nested(
         &self,
-        decl: TSModuleDeclaration<'a>,
-        parent_export: Option<Expression<'a>>,
-    ) -> Option<Statement<'a>> {
-        let mut names: FxHashSet<Atom<'a>> = FxHashSet::default();
-        let real_name = decl.id.name();
+        decl: ArenaBox<'a, TSModuleDeclaration<'a>>,
+        is_export: bool,
+        parent_stmts: &mut ArenaVec<'a, Statement<'a>>,
+        parent_binding: Option<&BoundIdentifier<'a>>,
+        ctx: &mut TraverseCtx<'a>,
+    ) {
+        if decl.declare {
+            return;
+        }
 
-        let name = self.ctx.ast.new_atom(&format!("_{}", real_name.clone())); // path.scope.generateUid(realName.name);
+        // Skip empty declaration e.g. `namespace x;`
+        let TSModuleDeclaration { span, id, body, scope_id, .. } = decl.unbox();
 
-        let namespace_top_level = if let Some(body) = decl.body {
-            match body {
-                TSModuleDeclarationBody::TSModuleBlock(mut block) => {
-                    self.ctx.ast.move_statement_vec(&mut block.body)
-                }
-                // We handle `namespace X.Y {}` as if it was
-                //   namespace X {
-                //     export namespace Y {}
-                //   }
-                TSModuleDeclarationBody::TSModuleDeclaration(declaration) => {
-                    let declaration =
-                        Declaration::TSModuleDeclaration(self.ctx.ast.copy(&declaration));
-                    let export_named_decl =
-                        self.ctx.ast.plain_export_named_declaration_declaration(SPAN, declaration);
-                    let stmt = self.ctx.ast.module_declaration(
-                        ModuleDeclaration::ExportNamedDeclaration(export_named_decl),
-                    );
-                    self.ctx.ast.new_vec_single(stmt)
-                }
-            }
-        } else {
-            self.ctx.ast.new_vec()
+        let TSModuleDeclarationName::Identifier(ident) = id else {
+            self.ctx.error(ambient_module_nested(span));
+            return;
         };
 
-        let mut is_empty = true;
-        let mut new_stmts = self.ctx.ast.new_vec();
+        let Some(body) = body else {
+            return;
+        };
+
+        let binding = BoundIdentifier::from_binding_ident(&ident);
+
+        // Reuse `TSModuleDeclaration`'s scope in transformed function
+        let scope_id = scope_id.get().unwrap();
+        let uid_binding =
+            ctx.generate_uid(&binding.name, scope_id, SymbolFlags::FunctionScopedVariable);
+
+        let directives;
+        let namespace_top_level;
+
+        match body {
+            TSModuleDeclarationBody::TSModuleBlock(block) => {
+                let block = block.unbox();
+                directives = block.directives;
+                namespace_top_level = block.body;
+            }
+            // We handle `namespace X.Y {}` as if it was
+            //   namespace X {
+            //     export namespace Y {}
+            //   }
+            TSModuleDeclarationBody::TSModuleDeclaration(declaration) => {
+                let declaration = Declaration::TSModuleDeclaration(declaration);
+                let export_named_decl =
+                    ctx.ast.plain_export_named_declaration_declaration(SPAN, declaration);
+                let stmt = Statement::ExportNamedDeclaration(export_named_decl);
+                directives = ctx.ast.vec();
+                namespace_top_level = ctx.ast.vec1(stmt);
+            }
+        }
+
+        let mut new_stmts = ctx.ast.vec();
 
         for stmt in namespace_top_level {
             match stmt {
                 Statement::TSModuleDeclaration(decl) => {
-                    let module_name = decl.id.name().clone();
-                    if let Some(transformed) = self.handle_nested(decl.unbox(), None) {
-                        is_empty = false;
-                        if names.insert(module_name.clone()) {
-                            new_stmts.push(Statement::from(
-                                self.create_variable_declaration(&module_name),
-                            ));
-                        }
-                        new_stmts.push(transformed);
-                    }
-                }
-                Statement::ClassDeclaration(decl) => {
-                    is_empty = false;
-                    decl.bound_names(&mut |id| {
-                        names.insert(id.name.clone());
-                    });
-                    new_stmts.push(Statement::ClassDeclaration(decl));
-                }
-                Statement::TSEnumDeclaration(enum_decl) => {
-                    is_empty = false;
-                    names.insert(enum_decl.id.name.clone());
-                    new_stmts.push(Statement::TSEnumDeclaration(enum_decl));
+                    self.handle_nested(decl, /* is_export */ false, &mut new_stmts, None, ctx);
+                    continue;
                 }
                 Statement::ExportNamedDeclaration(export_decl) => {
+                    // NB: `ExportNamedDeclaration` with no declaration (e.g. `export {x}`) is not
+                    // legal syntax in TS namespaces
                     let export_decl = export_decl.unbox();
                     if let Some(decl) = export_decl.declaration {
-                        if decl.modifiers().is_some_and(Modifiers::is_contains_declare) {
+                        if decl.declare() {
                             continue;
                         }
                         match decl {
-                            Declaration::TSEnumDeclaration(enum_decl) => {
-                                is_empty = false;
-                                self.add_declaration(
-                                    Declaration::TSEnumDeclaration(enum_decl),
-                                    &name,
-                                    &mut names,
-                                    &mut new_stmts,
-                                );
+                            Declaration::TSImportEqualsDeclaration(ref import_equals) => {
+                                let binding =
+                                    BoundIdentifier::from_binding_ident(&import_equals.id);
+                                new_stmts.push(Statement::from(decl));
+                                Self::add_declaration(&uid_binding, &binding, &mut new_stmts, ctx);
                             }
-                            Declaration::FunctionDeclaration(func_decl) => {
-                                is_empty = false;
-                                self.add_declaration(
-                                    Declaration::FunctionDeclaration(func_decl),
-                                    &name,
-                                    &mut names,
-                                    &mut new_stmts,
-                                );
+                            Declaration::TSEnumDeclaration(ref enum_decl) => {
+                                let binding = BoundIdentifier::from_binding_ident(&enum_decl.id);
+                                new_stmts.push(Statement::from(decl));
+                                Self::add_declaration(&uid_binding, &binding, &mut new_stmts, ctx);
                             }
-                            Declaration::ClassDeclaration(class_decl) => {
-                                is_empty = false;
-                                self.add_declaration(
-                                    Declaration::ClassDeclaration(class_decl),
-                                    &name,
-                                    &mut names,
-                                    &mut new_stmts,
+                            Declaration::ClassDeclaration(ref class_decl) => {
+                                // Class declaration always has a binding
+                                let binding = BoundIdentifier::from_binding_ident(
+                                    class_decl.id.as_ref().unwrap(),
                                 );
+                                new_stmts.push(Statement::from(decl));
+                                Self::add_declaration(&uid_binding, &binding, &mut new_stmts, ctx);
+                            }
+                            Declaration::FunctionDeclaration(ref func_decl)
+                                if !func_decl.is_typescript_syntax() =>
+                            {
+                                // Function declaration always has a binding
+                                let binding = BoundIdentifier::from_binding_ident(
+                                    func_decl.id.as_ref().unwrap(),
+                                );
+                                new_stmts.push(Statement::from(decl));
+                                Self::add_declaration(&uid_binding, &binding, &mut new_stmts, ctx);
                             }
                             Declaration::VariableDeclaration(var_decl) => {
-                                is_empty = false;
-                                let stmts = self.handle_variable_declaration(var_decl, &name);
+                                var_decl.declarations.iter().for_each(|decl| {
+                                    if !decl.kind.is_const() {
+                                        self.ctx.error(namespace_exporting_non_const(decl.span));
+                                    }
+                                });
+                                let stmts =
+                                    Self::handle_variable_declaration(var_decl, &uid_binding, ctx);
                                 new_stmts.extend(stmts);
                             }
                             Declaration::TSModuleDeclaration(module_decl) => {
-                                let module_name = module_decl.id.name().clone();
-                                if let Some(transformed) = self.handle_nested(
-                                    module_decl.unbox(),
-                                    Some(self.ctx.ast.identifier_reference_expression(
-                                        IdentifierReference::new(SPAN, name.clone()),
-                                    )),
-                                ) {
-                                    is_empty = false;
-                                    if names.insert(module_name.clone()) {
-                                        new_stmts.push(Statement::from(
-                                            self.create_variable_declaration(&module_name),
-                                        ));
-                                    }
-                                    new_stmts.push(transformed);
-                                }
+                                self.handle_nested(
+                                    module_decl,
+                                    /* is_export */
+                                    false,
+                                    &mut new_stmts,
+                                    Some(&uid_binding),
+                                    ctx,
+                                );
                             }
                             _ => {}
                         }
-                    } else {
-                        let stmt = self.ctx.ast.module_declaration(
-                            ModuleDeclaration::ExportNamedDeclaration(
-                                self.ctx.ast.alloc(export_decl),
-                            ),
-                        );
-                        new_stmts.push(stmt);
                     }
+                    continue;
                 }
-                stmt => {
-                    if let Some(decl) = stmt.as_declaration() {
-                        if decl.is_typescript_syntax() {
-                            continue;
-                        }
-                    }
-                    is_empty = false;
-                    new_stmts.push(stmt);
+                // Retain when `only_remove_type_imports` is true or there are value references
+                // The behavior is the same as `TypeScriptModule::transform_ts_import_equals`
+                Statement::TSImportEqualsDeclaration(decl)
+                    if !self.only_remove_type_imports
+                        && ctx
+                            .symbols()
+                            .get_resolved_references(decl.id.symbol_id())
+                            .all(Reference::is_type) =>
+                {
+                    continue;
                 }
+                Statement::TSTypeAliasDeclaration(_) | Statement::TSInterfaceDeclaration(_) => {
+                    continue
+                }
+                _ => {}
+            }
+            new_stmts.push(stmt);
+        }
+
+        if new_stmts.is_empty() {
+            // Delete the scope binding that `ctx.generate_uid` created above,
+            // as no binding is actually being created
+            ctx.scopes_mut().remove_binding(scope_id, uid_binding.name.as_str());
+
+            return;
+        }
+
+        if !Self::is_redeclaration_namespace(&ident, ctx) {
+            let declaration = Self::create_variable_declaration(&binding, ctx);
+            if is_export {
+                let export_named_decl =
+                    ctx.ast.plain_export_named_declaration_declaration(SPAN, declaration);
+                let stmt = Statement::ExportNamedDeclaration(export_named_decl);
+                parent_stmts.push(stmt);
+            } else {
+                parent_stmts.push(Statement::from(declaration));
             }
         }
+        let func_body = ctx.ast.function_body(SPAN, directives, new_stmts);
 
-        if is_empty {
-            return None;
-        }
-
-        Some(self.transform_namespace(&name, real_name, new_stmts, parent_export))
+        parent_stmts.push(Self::transform_namespace(
+            span,
+            &uid_binding,
+            &binding,
+            parent_binding,
+            func_body,
+            scope_id,
+            ctx,
+        ));
     }
 
     // `namespace Foo { }` -> `let Foo; (function (_Foo) { })(Foo || (Foo = {}));`
     //                         ^^^^^^^
-    fn create_variable_declaration(&self, name: &Atom<'a>) -> Declaration<'a> {
+    fn create_variable_declaration(
+        binding: &BoundIdentifier<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> Declaration<'a> {
         let kind = VariableDeclarationKind::Let;
-        let declarator = {
-            let ident = BindingIdentifier::new(SPAN, name.clone());
-            let pattern_kind = self.ctx.ast.binding_pattern_identifier(ident);
-            let binding = self.ctx.ast.binding_pattern(pattern_kind, None, false);
-            let decl = self.ctx.ast.variable_declarator(SPAN, kind, binding, None, false);
-            self.ctx.ast.new_vec_single(decl)
+        let declarations = {
+            let pattern = binding.create_binding_pattern(ctx);
+            let decl = ctx.ast.variable_declarator(SPAN, kind, pattern, None, false);
+            ctx.ast.vec1(decl)
         };
-        Declaration::VariableDeclaration(self.ctx.ast.variable_declaration(
-            SPAN,
-            kind,
-            declarator,
-            Modifiers::empty(),
-        ))
+        ctx.ast.declaration_variable(SPAN, kind, declarations, false)
     }
 
     // `namespace Foo { }` -> `let Foo; (function (_Foo) { })(Foo || (Foo = {}));`
-    //                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     fn transform_namespace(
-        &self,
-        arg_name: &Atom<'a>,
-        real_name: &Atom<'a>,
-        stmts: Vec<'a, Statement<'a>>,
-        parent_export: Option<Expression<'a>>,
+        span: Span,
+        param_binding: &BoundIdentifier<'a>,
+        binding: &BoundIdentifier<'a>,
+        parent_binding: Option<&BoundIdentifier<'a>>,
+        func_body: FunctionBody<'a>,
+        scope_id: ScopeId,
+        ctx: &mut TraverseCtx<'a>,
     ) -> Statement<'a> {
         // `(function (_N) { var x; })(N || (N = {}))`;
         //  ^^^^^^^^^^^^^^^^^^^^^^^^^^
         let callee = {
-            let body = self.ctx.ast.function_body(SPAN, self.ctx.ast.new_vec(), stmts);
             let params = {
-                let ident = self.ctx.ast.binding_pattern_identifier(BindingIdentifier::new(
-                    SPAN,
-                    self.ctx.ast.new_atom(arg_name),
-                ));
-                let pattern = self.ctx.ast.binding_pattern(ident, None, false);
-                let items =
-                    self.ctx.ast.new_vec_single(self.ctx.ast.plain_formal_parameter(SPAN, pattern));
-                self.ctx.ast.formal_parameters(
-                    SPAN,
-                    FormalParameterKind::FormalParameter,
-                    items,
-                    None,
-                )
+                let pattern = param_binding.create_binding_pattern(ctx);
+                let items = ctx.ast.vec1(ctx.ast.plain_formal_parameter(SPAN, pattern));
+                ctx.ast.formal_parameters(SPAN, FormalParameterKind::FormalParameter, items, NONE)
             };
-            let function = self.ctx.ast.plain_function(
-                FunctionType::FunctionExpression,
-                SPAN,
-                None,
-                params,
-                Some(body),
-            );
-            let function_expr = self.ctx.ast.function_expression(function);
-            self.ctx.ast.parenthesized_expression(SPAN, function_expr)
+            let function_expr =
+                Expression::FunctionExpression(ctx.ast.alloc_plain_function_with_scope_id(
+                    FunctionType::FunctionExpression,
+                    SPAN,
+                    None,
+                    params,
+                    func_body,
+                    scope_id,
+                ));
+            *ctx.scopes_mut().get_flags_mut(scope_id) =
+                ScopeFlags::Function | ScopeFlags::StrictMode;
+            ctx.ast.expression_parenthesized(SPAN, function_expr)
         };
 
         // (function (_N) { var M; (function (_M) { var x; })(M || (M = _N.M || (_N.M = {})));})(N || (N = {}));
@@ -327,105 +319,93 @@ impl<'a> TypeScript<'a> {
         //                                                   Nested namespace arguments         Normal namespace arguments
         let arguments = {
             // M
-            let logical_left = {
-                let ident = IdentifierReference::new(SPAN, real_name.clone());
-                self.ctx.ast.identifier_reference_expression(ident)
-            };
+            let logical_left = binding.create_read_expression(ctx);
 
             // (_N.M = {}) or (N = {})
             let mut logical_right = {
                 // _N.M
-                let assign_left = if let Some(parent_export) = self.ctx.ast.copy(&parent_export) {
-                    self.ctx.ast.simple_assignment_target_member_expression(
-                        self.ctx.ast.static_member(
-                            SPAN,
-                            parent_export,
-                            self.ctx.ast.identifier_name(SPAN, real_name),
-                            false,
-                        ),
-                    )
+                let assign_left = if let Some(parent_binding) = parent_binding {
+                    AssignmentTarget::from(ctx.ast.member_expression_static(
+                        SPAN,
+                        parent_binding.create_read_expression(ctx),
+                        ctx.ast.identifier_name(SPAN, binding.name),
+                        false,
+                    ))
                 } else {
                     // _N
-                    self.ctx.ast.simple_assignment_target_identifier(IdentifierReference::new(
-                        SPAN,
-                        real_name.clone(),
-                    ))
+                    binding.create_write_target(ctx)
                 };
 
-                let assign_right =
-                    self.ctx.ast.object_expression(SPAN, self.ctx.ast.new_vec(), None);
+                let assign_right = ctx.ast.expression_object(SPAN, ctx.ast.vec(), None);
                 let op = AssignmentOperator::Assign;
                 let assign_expr =
-                    self.ctx.ast.assignment_expression(SPAN, op, assign_left, assign_right);
-                self.ctx.ast.parenthesized_expression(SPAN, assign_expr)
+                    ctx.ast.expression_assignment(SPAN, op, assign_left, assign_right);
+                ctx.ast.expression_parenthesized(SPAN, assign_expr)
             };
 
             // (M = _N.M || (_N.M = {}))
-            if let Some(parent_export) = parent_export {
-                let assign_left = self.ctx.ast.simple_assignment_target_identifier(
-                    IdentifierReference::new(SPAN, real_name.clone()),
-                );
+            if let Some(parent_binding) = parent_binding {
+                let assign_left = binding.create_write_target(ctx);
                 let assign_right = {
-                    let property = self.ctx.ast.identifier_name(SPAN, real_name);
-                    let logical_left =
-                        self.ctx.ast.static_member_expression(SPAN, parent_export, property, false);
+                    let property = ctx.ast.identifier_name(SPAN, binding.name);
+                    let logical_left = ctx.ast.member_expression_static(
+                        SPAN,
+                        parent_binding.create_read_expression(ctx),
+                        property,
+                        false,
+                    );
                     let op = LogicalOperator::Or;
-                    self.ctx.ast.logical_expression(SPAN, logical_left, op, logical_right)
+                    ctx.ast.expression_logical(SPAN, logical_left.into(), op, logical_right)
                 };
                 let op = AssignmentOperator::Assign;
-                logical_right =
-                    self.ctx.ast.assignment_expression(SPAN, op, assign_left, assign_right);
-                logical_right = self.ctx.ast.parenthesized_expression(SPAN, logical_right);
+                logical_right = ctx.ast.expression_assignment(SPAN, op, assign_left, assign_right);
+                logical_right = ctx.ast.expression_parenthesized(SPAN, logical_right);
             }
 
-            let op = LogicalOperator::Or;
-            let expr = self.ctx.ast.logical_expression(SPAN, logical_left, op, logical_right);
-            self.ctx.ast.new_vec_single(Argument::from(expr))
+            let expr =
+                ctx.ast.expression_logical(SPAN, logical_left, LogicalOperator::Or, logical_right);
+            ctx.ast.vec1(Argument::from(expr))
         };
 
-        let expr = self.ctx.ast.call_expression(SPAN, callee, arguments, false, None);
-        self.ctx.ast.expression_statement(SPAN, expr)
+        let expr = ctx.ast.expression_call(SPAN, callee, NONE, arguments, false);
+        ctx.ast.statement_expression(span, expr)
     }
 
     /// Add assignment statement for decl id
     /// function id() {} -> function id() {}; Name.id = id;
     fn add_declaration(
-        &self,
-        decl: Declaration<'a>,
-        name: &Atom<'a>,
-        names: &mut FxHashSet<Atom<'a>>,
-        new_stmts: &mut Vec<'a, Statement<'a>>,
+        namespace_binding: &BoundIdentifier<'a>,
+        value_binding: &BoundIdentifier<'a>,
+        new_stmts: &mut ArenaVec<'a, Statement<'a>>,
+        ctx: &mut TraverseCtx<'a>,
     ) {
-        if let Some(ident) = decl.id() {
-            let item_name = ident.name.clone();
-            let assignment_statement = self.create_assignment_statement(name, &item_name);
-            new_stmts.push(Statement::from(decl));
-            let assignment_statement =
-                self.ctx.ast.expression_statement(SPAN, assignment_statement);
-            new_stmts.push(assignment_statement);
-            names.insert(item_name);
-        }
+        let assignment_statement =
+            Self::create_assignment_statement(namespace_binding, value_binding, ctx);
+        let assignment_statement = ctx.ast.statement_expression(SPAN, assignment_statement);
+        new_stmts.push(assignment_statement);
     }
 
-    // name.item_name = item_name
-    fn create_assignment_statement(&self, name: &Atom<'a>, item_name: &Atom<'a>) -> Expression<'a> {
-        let ident = self.ctx.ast.identifier_reference(SPAN, name.as_str());
-        let object = self.ctx.ast.identifier_reference_expression(ident);
-        let property = IdentifierName::new(SPAN, item_name.clone());
-        let left = self.ctx.ast.static_member(SPAN, object, property, false);
+    // parent_binding.binding = binding
+    fn create_assignment_statement(
+        object_binding: &BoundIdentifier<'a>,
+        value_binding: &BoundIdentifier<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> Expression<'a> {
+        let object = object_binding.create_read_expression(ctx);
+        let property = ctx.ast.identifier_name(SPAN, value_binding.name);
+        let left = ctx.ast.member_expression_static(SPAN, object, property, false);
         let left = AssignmentTarget::from(left);
-        let ident = self.ctx.ast.identifier_reference(SPAN, item_name.as_str());
-        let right = self.ctx.ast.identifier_reference_expression(ident);
+        let right = value_binding.create_read_expression(ctx);
         let op = AssignmentOperator::Assign;
-        self.ctx.ast.assignment_expression(SPAN, op, left, right)
+        ctx.ast.expression_assignment(SPAN, op, left, right)
     }
 
     /// Convert `export const foo = 1` to `Namespace.foo = 1`;
     fn handle_variable_declaration(
-        &self,
-        mut var_decl: Box<'a, VariableDeclaration<'a>>,
-        name: &Atom<'a>,
-    ) -> Vec<'a, Statement<'a>> {
+        mut var_decl: ArenaBox<'a, VariableDeclaration<'a>>,
+        binding: &BoundIdentifier<'a>,
+        ctx: &mut TraverseCtx<'a>,
+    ) -> ArenaVec<'a, Statement<'a>> {
         let is_all_binding_identifier = var_decl
             .declarations
             .iter()
@@ -435,45 +415,61 @@ impl<'a> TypeScript<'a> {
         // is smaller than `const a = 1; N.a = a`;
         if is_all_binding_identifier {
             var_decl.declarations.iter_mut().for_each(|declarator| {
-                let Some(property_name) = declarator.id.get_identifier() else {
+                let Some(property_name) = declarator.id.get_identifier_name() else {
                     return;
                 };
-                if let Some(init) = &declarator.init {
-                    declarator.init = Some(self.ctx.ast.assignment_expression(
-                        SPAN,
-                        AssignmentOperator::Assign,
-                        self.ctx.ast.simple_assignment_target_member_expression(
-                            self.ctx.ast.static_member(
+                if let Some(init) = &mut declarator.init {
+                    declarator.init = Some(
+                        ctx.ast.expression_assignment(
+                            SPAN,
+                            AssignmentOperator::Assign,
+                            SimpleAssignmentTarget::from(ctx.ast.member_expression_static(
                                 SPAN,
-                                self.ctx.ast.identifier_reference_expression(
-                                    IdentifierReference::new(SPAN, name.clone()),
-                                ),
-                                IdentifierName::new(SPAN, property_name.clone()),
+                                binding.create_read_expression(ctx),
+                                ctx.ast.identifier_name(SPAN, property_name),
                                 false,
-                            ),
+                            ))
+                            .into(),
+                            ctx.ast.move_expression(init),
                         ),
-                        self.ctx.ast.copy(init),
-                    ));
+                    );
                 }
             });
-            return self.ctx.ast.new_vec_single(Statement::VariableDeclaration(var_decl));
+            return ctx.ast.vec1(Statement::VariableDeclaration(var_decl));
         }
 
         // Now we have pattern in declarators
         // `export const [a] = 1` transforms to `const [a] = 1; N.a = a`
-        let mut assignments = self.ctx.ast.new_vec();
+        let mut assignments = ctx.ast.vec();
         var_decl.bound_names(&mut |id| {
-            assignments.push(self.create_assignment_statement(name, &id.name));
+            assignments.push(Self::create_assignment_statement(
+                binding,
+                &BoundIdentifier::from_binding_ident(id),
+                ctx,
+            ));
         });
 
-        let mut stmts = self.ctx.ast.new_vec_with_capacity(2);
-        stmts.push(Statement::VariableDeclaration(var_decl));
-        stmts.push(
-            self.ctx
-                .ast
-                .expression_statement(SPAN, self.ctx.ast.sequence_expression(SPAN, assignments)),
-        );
-        stmts
+        ctx.ast.vec_from_array([
+            Statement::VariableDeclaration(var_decl),
+            ctx.ast.statement_expression(SPAN, ctx.ast.expression_sequence(SPAN, assignments)),
+        ])
+    }
+
+    /// Check the namespace binding identifier if it is a redeclaration
+    fn is_redeclaration_namespace(id: &BindingIdentifier<'a>, ctx: &TraverseCtx<'a>) -> bool {
+        let symbol_id = id.symbol_id();
+        // Only `enum`, `class`, `function` and `namespace` can be re-declared in same scope
+        ctx.symbols()
+            .get_flags(symbol_id)
+            .intersects(SymbolFlags::RegularEnum | SymbolFlags::Class | SymbolFlags::Function)
+            || {
+                // ```
+                // namespace Foo {}
+                // namespace Foo {} // is redeclaration
+                // ```
+                let redeclarations = ctx.symbols().get_redeclarations(symbol_id);
+                !redeclarations.is_empty() && redeclarations.contains(&id.span)
+            }
     }
 }
 

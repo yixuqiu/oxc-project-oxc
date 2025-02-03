@@ -1,29 +1,25 @@
+#![allow(unused, clippy::unused_self)]
 //! Prettier
 //!
 //! A port of <https://github.com/prettier/prettier>
 
-#![allow(clippy::wildcard_imports)]
-
 mod binaryish;
 mod comments;
-mod doc;
 mod format;
+mod ir;
 mod macros;
 mod needs_parens;
 mod options;
 mod printer;
 mod utils;
 
-use std::{iter::Peekable, vec};
-
-use oxc_allocator::Allocator;
-use oxc_ast::{ast::Program, AstKind, CommentKind, Trivias};
+use oxc_allocator::{Allocator, Vec};
+use oxc_ast::{ast::Program, AstKind};
 use oxc_span::Span;
 use oxc_syntax::identifier::is_line_terminator;
 
-use crate::{doc::Doc, doc::DocBuilder, format::Format, printer::Printer};
-
 pub use crate::options::{ArrowParens, EndOfLine, PrettierOptions, QuoteProps, TrailingComma};
+use crate::{format::Format, ir::Doc, printer::Printer};
 
 type GroupId = u32;
 #[derive(Default)]
@@ -51,45 +47,31 @@ pub struct Prettier<'a> {
 
     options: PrettierOptions,
 
-    /// A stack of comments that will be carefully placed in the right places.
-    trivias: Peekable<vec::IntoIter<(CommentKind, Span)>>,
-
     /// The stack of AST Nodes
-    /// See <https://github.com/prettier/prettier/blob/main/src/common/ast-path.js>
-    stack: Vec<AstKind<'a>>,
+    /// See <https://github.com/prettier/prettier/blob/3.3.3/src/common/ast-path.js>
+    stack: Vec<'a, AstKind<'a>>,
 
     group_id_builder: GroupIdBuilder,
     args: PrettierArgs,
 }
 
-impl<'a> DocBuilder<'a> for Prettier<'a> {
-    #[inline]
-    fn allocator(&self) -> &'a Allocator {
-        self.allocator
-    }
-}
-
 impl<'a> Prettier<'a> {
-    pub fn new(
-        allocator: &'a Allocator,
-        source_text: &'a str,
-        trivias: &Trivias,
-        options: PrettierOptions,
-    ) -> Self {
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new(allocator: &'a Allocator, options: PrettierOptions) -> Self {
         Self {
             allocator,
-            source_text,
+            source_text: "",
             options,
-            trivias: trivias.comments().collect::<Vec<_>>().into_iter().peekable(),
-            stack: vec![],
+            stack: Vec::new_in(allocator),
             group_id_builder: GroupIdBuilder::default(),
             args: PrettierArgs::default(),
         }
     }
 
-    pub fn build(mut self, program: &Program<'a>) -> String {
-        let doc = program.format(&mut self);
-        Printer::new(doc, self.source_text, self.options, self.allocator).build()
+    pub fn build(&mut self, program: &Program<'a>) -> String {
+        self.source_text = program.source_text;
+        let doc = program.format(self);
+        Printer::new(doc, program.source_text, self.options, self.allocator).build()
     }
 
     pub fn doc(mut self, program: &Program<'a>) -> Doc<'a> {
@@ -129,21 +111,18 @@ impl<'a> Prettier<'a> {
         // SAFETY:
         // This should be safe as long as `src` is an reference from the allocator.
         // But honestly, I'm not really sure if this is safe.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::mem::transmute(t)
-        }
+
+        unsafe { std::mem::transmute(t) }
     }
 
     pub fn semi(&self) -> Option<Doc<'a>> {
-        self.options.semi.then(|| Doc::Str(";"))
+        self.options.semi.then_some(Doc::Str(";"))
     }
 
     pub fn should_print_es5_comma(&self) -> bool {
         self.should_print_comma_impl(false)
     }
 
-    #[allow(unused)]
     fn should_print_all_comma(&self) -> bool {
         self.should_print_comma_impl(true)
     }

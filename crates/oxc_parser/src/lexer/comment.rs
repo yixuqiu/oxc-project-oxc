@@ -1,14 +1,15 @@
+use memchr::memmem::Finder;
+
+use oxc_syntax::identifier::is_line_terminator;
+
+use crate::diagnostics;
+
 use super::{
     cold_branch,
     search::{byte_search, safe_byte_match_table, SafeByteMatchTable},
     source::SourcePosition,
     Kind, Lexer,
 };
-use crate::diagnostics;
-
-use oxc_syntax::identifier::is_line_terminator;
-
-use memchr::memmem::Finder;
 
 // Irregular line breaks - '\u{2028}' (LS) and '\u{2029}' (PS)
 const LS_OR_PS_FIRST: u8 = 0xE2;
@@ -32,11 +33,11 @@ impl<'a> Lexer<'a> {
                 // If this is end of comment, create trivia, and advance `pos` to after line break.
                 // Do that here rather than in `handle_match`, to avoid branching twice on value of
                 // the matched byte.
-                #[allow(clippy::if_not_else)]
+                #[expect(clippy::if_not_else)]
                 if next_byte != LS_OR_PS_FIRST {
                     // `\r` or `\n`
                     self.trivia_builder
-                        .add_single_line_comment(self.token.start, self.source.offset_of(pos));
+                        .add_line_comment(self.token.start, self.source.offset_of(pos));
                     // SAFETY: Safe to consume `\r` or `\n` as both are ASCII
                     pos = unsafe { pos.add(1) };
                     // We've found the end. Do not continue searching.
@@ -51,7 +52,7 @@ impl<'a> Lexer<'a> {
                         if matches!(next2, LS_BYTES_2_AND_3 | PS_BYTES_2_AND_3) {
                             // Irregular line break
                             self.trivia_builder
-                                .add_single_line_comment(self.token.start, self.source.offset_of(pos));
+                                .add_line_comment(self.token.start, self.source.offset_of(pos));
                             // Advance `pos` to after this char.
                             // SAFETY: `0xE2` is always 1st byte of a 3-byte UTF-8 char,
                             // so consuming 3 bytes will place `pos` on next UTF-8 char boundary.
@@ -70,7 +71,7 @@ impl<'a> Lexer<'a> {
                 }
             },
             handle_eof: {
-                self.trivia_builder.add_single_line_comment(self.token.start, self.offset());
+                self.trivia_builder.add_line_comment(self.token.start, self.offset());
                 return Kind::Skip;
             },
         };
@@ -116,10 +117,7 @@ impl<'a> Lexer<'a> {
                     cold_branch(|| {
                         // SAFETY: Next byte is `0xE2` which is always 1st byte of a 3-byte UTF-8 char.
                         // So safe to advance `pos` by 1 and read 2 bytes.
-                        let next2 = unsafe {
-                            pos = pos.add(1);
-                            pos.read2()
-                        };
+                        let next2 = unsafe { pos.add(1).read2() };
                         if matches!(next2, LS_BYTES_2_AND_3 | PS_BYTES_2_AND_3) {
                             // Irregular line break
                             self.token.is_on_new_line = true;
@@ -128,11 +126,10 @@ impl<'a> Lexer<'a> {
                             // But irregular line breaks are rare anyway.
                         }
                         // Either way, continue searching.
-                        // Skip 3 bytes (skipped 1 byte above, macro skips 1 more, so skip 1 more here
-                        // to make 3), and continue searching.
+                        // Skip 3 bytes (macro skips 1 already, so skip 2 here), and continue searching.
                         // SAFETY: `0xE2` is always 1st byte of a 3-byte UTF-8 char,
                         // so consuming 3 bytes will place `pos` on next UTF-8 char boundary.
-                        pos = unsafe { pos.add(1) };
+                        pos = unsafe { pos.add(2) };
                         true
                     })
                 } else {
@@ -145,16 +142,16 @@ impl<'a> Lexer<'a> {
                 }
             },
             handle_eof: {
-                self.error(diagnostics::UnterminatedMultiLineComment(self.unterminated_range()));
+                self.error(diagnostics::unterminated_multi_line_comment(self.unterminated_range()));
                 return Kind::Eof;
             },
         };
 
-        self.trivia_builder.add_multi_line_comment(self.token.start, self.offset());
+        self.trivia_builder.add_block_comment(self.token.start, self.offset());
         Kind::Skip
     }
 
-    fn skip_multi_line_comment_after_line_break(&mut self, pos: SourcePosition) -> Kind {
+    fn skip_multi_line_comment_after_line_break(&mut self, pos: SourcePosition<'a>) -> Kind {
         // Can use `memchr` here as only searching for 1 pattern.
         // Cache `Finder` instance on `Lexer` as there's a significant cost to creating it.
         // `Finder::new` isn't a const function, so can't make it a `static`, and `lazy_static!`
@@ -170,21 +167,22 @@ impl<'a> Lexer<'a> {
         if let Some(index) = finder.find(remaining) {
             // SAFETY: `pos + index + 2` is end of `*/`, so a valid `SourcePosition`
             self.source.set_position(unsafe { pos.add(index + 2) });
-            self.trivia_builder.add_multi_line_comment(self.token.start, self.offset());
+            self.trivia_builder.add_block_comment(self.token.start, self.offset());
             Kind::Skip
         } else {
             self.source.advance_to_end();
-            self.error(diagnostics::UnterminatedMultiLineComment(self.unterminated_range()));
+            self.error(diagnostics::unterminated_multi_line_comment(self.unterminated_range()));
             Kind::Eof
         }
     }
 
     /// Section 12.5 Hashbang Comments
     pub(super) fn read_hashbang_comment(&mut self) -> Kind {
-        while let Some(c) = self.next_char().as_ref() {
+        while let Some(c) = self.peek_char().as_ref() {
             if is_line_terminator(*c) {
                 break;
             }
+            self.consume_char();
         }
         self.token.is_on_new_line = true;
         Kind::HashbangComment

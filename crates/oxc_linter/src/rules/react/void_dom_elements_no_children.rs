@@ -5,40 +5,50 @@ use oxc_ast::{
     },
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use phf::phf_set;
 
-use crate::{context::LintContext, rule::Rule, utils::is_create_element_call, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    utils::is_create_element_call,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(void-dom-elements-no-children): Disallow void DOM elements (e.g. `<img />`, `<br />`) from receiving children.")]
-#[diagnostic(severity(warning), help("Void DOM element <{0:?} /> cannot receive children."))]
-struct VoidDomElementsNoChildrenDiagnostic(pub String, #[label] pub Span);
+fn void_dom_elements_no_children_diagnostic(tag: &str, span: Span) -> OxcDiagnostic {
+    // TODO: use imperative phrasing
+    OxcDiagnostic::warn(format!("Void DOM element <{tag:?} /> cannot receive children."))
+        .with_help("Remove this element's children or use a non-void element.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct VoidDomElementsNoChildren;
 
 declare_oxc_lint!(
     /// ### What it does
+    /// Disallow void DOM elements (e.g. `<img />`, `<br />`) from receiving children.
+    ///
+    /// ### Why is this bad?
     /// There are some HTML elements that are only self-closing (e.g. img, br, hr). These are collectively known as void DOM elements.
     /// This rule checks that children are not passed to void DOM elements.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <br>Children</br>
     /// <br children='Children' />
     /// <br dangerouslySetInnerHTML={{ __html: 'HTML' }} />
     /// React.createElement('br', undefined, 'Children')
     /// React.createElement('br', { children: 'Children' })
     /// React.createElement('br', { dangerouslySetInnerHTML: { __html: 'HTML' } })
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <div>Children</div>
     /// <div children='Children' />
     /// <div dangerouslySetInnerHTML={{ __html: 'HTML' }} />
@@ -47,6 +57,7 @@ declare_oxc_lint!(
     /// React.createElement('div', { dangerouslySetInnerHTML: { __html: 'HTML' } })
     /// ```
     VoidDomElementsNoChildren,
+    react,
     correctness
 );
 
@@ -84,8 +95,8 @@ impl Rule for VoidDomElementsNoChildren {
                     });
 
                 if !jsx_el.children.is_empty() || has_children_attribute_or_danger {
-                    ctx.diagnostic(VoidDomElementsNoChildrenDiagnostic(
-                        identifier.name.to_string(),
+                    ctx.diagnostic(void_dom_elements_no_children_diagnostic(
+                        &identifier.name,
                         identifier.span,
                     ));
                 }
@@ -128,14 +139,18 @@ impl Rule for VoidDomElementsNoChildren {
                     });
 
                 if call_expr.arguments.get(2).is_some() || has_children_prop_or_danger {
-                    ctx.diagnostic(VoidDomElementsNoChildrenDiagnostic(
-                        element_name.value.to_string(),
+                    ctx.diagnostic(void_dom_elements_no_children_diagnostic(
+                        &element_name.value,
                         element_name.span,
                     ));
                 }
             }
             _ => {}
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
@@ -220,5 +235,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(VoidDomElementsNoChildren::NAME, pass, fail).test_and_snapshot();
+    Tester::new(VoidDomElementsNoChildren::NAME, VoidDomElementsNoChildren::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

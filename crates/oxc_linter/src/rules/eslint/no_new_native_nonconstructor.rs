@@ -1,17 +1,13 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-new-native-nonconstructor): `{0}` cannot be called as a constructor.")]
-#[diagnostic(severity(warning))]
-struct NoNewNativeNonconstructorDiagnostic(CompactStr, #[label] pub Span);
+fn no_new_native_nonconstructor_diagnostic(fn_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("`{fn_name}` cannot be called as a constructor.")).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoNewNativeNonconstructor;
@@ -19,36 +15,51 @@ pub struct NoNewNativeNonconstructor;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Disallow new operators with global non-constructor functions (Symbol, BigInt)
+    /// Disallow `new` operators with global non-constructor functions (`Symbol`, `BigInt`)
     ///
     /// ### Why is this bad?
     ///
-    /// Both new Symbol and new BigInt throw a type error because they are functions and not classes.
-    /// It is easy to make this mistake by assuming the uppercase letters indicate classes.
+    /// Both `new Symbol` and `new BigInt` throw a type error because they are
+    /// functions and not classes.  It is easy to make this mistake by assuming
+    /// the uppercase letters indicate classes.
     ///
     /// ### Example
-    /// ```javascript
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```js
     /// // throws a TypeError
     /// let foo = new Symbol("foo");
     ///
     /// // throws a TypeError
     /// let result = new BigInt(9007199254740991);
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```js
+    /// let foo = Symbol("foo");
+    ///
+    /// let result = BigInt(9007199254740991);
+    /// ```
     NoNewNativeNonconstructor,
+    eslint,
     correctness,
 );
 
 impl Rule for NoNewNativeNonconstructor {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::NewExpression(expr) = node.kind() else { return };
-        let Expression::Identifier(ident) = &expr.callee else { return };
+        let AstKind::NewExpression(expr) = node.kind() else {
+            return;
+        };
+        let Expression::Identifier(ident) = &expr.callee else {
+            return;
+        };
         if matches!(ident.name.as_str(), "Symbol" | "BigInt")
             && ctx.semantic().is_reference_to_global_variable(ident)
         {
             let start = expr.span.start;
             let end = start + 3;
-            ctx.diagnostic(NoNewNativeNonconstructorDiagnostic(
-                ident.name.to_compact_str(),
+            ctx.diagnostic(no_new_native_nonconstructor_diagnostic(
+                ident.name.as_str(),
                 Span::new(start, end),
             ));
         }
@@ -79,5 +90,6 @@ fn test() {
         "function bar() { return function BigInt() {}; } var baz = new BigInt(9007199254740991);",
     ];
 
-    Tester::new(NoNewNativeNonconstructor::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoNewNativeNonconstructor::NAME, NoNewNativeNonconstructor::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

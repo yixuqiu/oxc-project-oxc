@@ -1,22 +1,18 @@
-use crate::{
-    context::LintContext,
-    fixer::Fix,
-    rule::Rule,
-    utils::{collect_possible_jest_call_node, parse_expect_jest_fn_call, PossibleJestNode},
-};
-
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(prefer-strict-equal): Suggest using `toStrictEqual()`.")]
-#[diagnostic(severity(warning), help("Use `toStrictEqual()` instead"))]
-struct UseToStrictEqual(#[label] Span);
+use crate::{
+    context::LintContext,
+    rule::Rule,
+    utils::{parse_expect_jest_fn_call, PossibleJestNode},
+};
+
+fn use_to_strict_equal(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using `toStrictEqual()`.")
+        .with_help("Use `toStrictEqual()` instead")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferStrictEqual;
@@ -37,54 +33,49 @@ declare_oxc_lint!(
     /// ```
     ///
     PreferStrictEqual,
+    jest,
     style,
+    fix
 );
 
 impl Rule for PreferStrictEqual {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
 impl PreferStrictEqual {
-    fn run<'a>(possible_jest_node: &PossibleJestNode<'a, '_>, ctx: &LintContext<'a>) {
-        let node = possible_jest_node.node;
-        let AstKind::CallExpression(call_expr) = node.kind() else {
-            return;
-        };
-        let Some(parse_jest_expect_fn_call) =
-            parse_expect_jest_fn_call(call_expr, possible_jest_node, ctx)
-        else {
-            return;
-        };
-        let Some(matcher) = parse_jest_expect_fn_call.matcher() else {
-            return;
-        };
-        let Some(matcher_name) = matcher.name() else {
-            return;
-        };
+    fn run<'a>(possible_jest_node: &PossibleJestNode<'a, '_>, ctx: &LintContext<'a>) -> Option<()> {
+        let call_expr = possible_jest_node.node.kind().as_call_expression()?;
+        let parse_jest_expect_fn_call =
+            parse_expect_jest_fn_call(call_expr, possible_jest_node, ctx)?;
+        let matcher = parse_jest_expect_fn_call.matcher()?;
+        let matcher_name = matcher.name()?;
 
         if matcher_name.eq("toEqual") {
-            ctx.diagnostic_with_fix(UseToStrictEqual(matcher.span), || {
-                let mut formatter = ctx.codegen();
-                formatter.print_str(
-                    matcher
-                        .span
-                        .source_text(ctx.source_text())
-                        .replace(matcher_name.to_string().as_str(), "toStrictEqual")
-                        .as_bytes(),
-                );
-                Fix::new(formatter.into_source_text(), matcher.span)
+            ctx.diagnostic_with_fix(use_to_strict_equal(matcher.span), |fixer| {
+                let replacement = match fixer.source_range(matcher.span).chars().next().unwrap() {
+                    '\'' => "'toStrictEqual'",
+                    '"' => "\"toStrictEqual\"",
+                    '`' => "`toStrictEqual`",
+                    _ => "toStrictEqual",
+                };
+                fixer.replace(matcher.span, replacement)
             });
         }
+        None
     }
 }
 
 #[test]
 fn test() {
     use crate::tester::Tester;
+
+    // Note: Both Jest and Vitest share the same unit tests
 
     let pass = vec![
         ("expect(something).toStrictEqual(somethingElse);", None),
@@ -116,7 +107,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(PreferStrictEqual::NAME, pass, fail)
+    Tester::new(PreferStrictEqual::NAME, PreferStrictEqual::PLUGIN, pass, fail)
         .with_jest_plugin(true)
         .expect_fix(fix)
         .test_and_snapshot();

@@ -1,9 +1,5 @@
-#[allow(clippy::wildcard_imports)]
 use oxc_ast::{ast::*, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator};
@@ -25,13 +21,13 @@ declare_oxc_lint!(
     /// Disallow expressions where the operation doesn't affect the value
     ///
     /// ### Why is this bad?
-    /// Comparisons which will always evaluate to true or false and logical expressions (||, &&, ??) which either always
+    /// Comparisons which will always evaluate to true or false and logical expressions (`||`, `&&`, `??`) which either always
     /// short-circuit or never short-circuit are both likely indications of programmer error.
     ///
     /// These errors are especially common in complex expressions where operator precedence is easy to misjudge.
     ///
     /// Additionally, this rule detects comparisons to newly constructed objects/arrays/functions/etc.
-    /// In JavaScript, where objects are compared by reference, a newly constructed object can never === any other value.
+    /// In JavaScript, where objects are compared by reference, a newly constructed object can never `===` any other value.
     /// This can be surprising for programmers coming from languages where objects are compared by value.
     ///
     /// ### Example
@@ -48,42 +44,44 @@ declare_oxc_lint!(
     /// // However, this will always result in `isEmpty` being `false`.
     /// ```
     NoConstantBinaryExpression,
+    eslint,
     correctness
 );
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint(no-constant-binary-expression): Unexpected constant {0:?} on the left-hand side of a {1:?} expression"
-)]
-#[diagnostic(
-    severity(warning),
-    help("This expression always evaluates to the constant on the left-hand side")
-)]
-struct ConstantShortCircuit(&'static str, &'static str, #[label] Span);
+fn constant_short_circuit(lhs_name: &str, expr_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "Unexpected constant {lhs_name:?} on the left-hand side of a {expr_name:?} expression"
+    ))
+    .with_help("This expression always evaluates to the constant on the left-hand side")
+    .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-constant-binary-expression): Unexpected constant binary expression")]
-#[diagnostic(severity(warning), help("This compares constantly with the {0}-hand side of the {1}"))]
-struct ConstantBinaryOperand(&'static str, &'static str, #[label] Span);
+fn constant_binary_operand(left_or_right: &str, operator: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected constant binary expression")
+        .with_help(format!(
+            "This compares constantly with the {left_or_right}-hand side of the {operator}"
+        ))
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-constant-binary-expression): Unexpected comparison to newly constructed object")]
-#[diagnostic(severity(warning), help("These two values can never be equal"))]
-struct ConstantAlwaysNew(#[label] Span);
+fn constant_always_new(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected comparison to newly constructed object")
+        .with_help("These two values can never be equal")
+        .with_label(span)
+}
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint(no-constant-binary-expression): Unexpected comparison of two newly constructed objects"
-)]
-#[diagnostic(severity(warning), help("These two values can never be equal"))]
-struct ConstantBothAlwaysNew(#[label] Span);
+fn constant_both_always_new(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected comparison of two newly constructed objects")
+        .with_help("These two values can never be equal")
+        .with_label(span)
+}
 
 impl Rule for NoConstantBinaryExpression {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::LogicalExpression(expr) => match expr.operator {
                 LogicalOperator::Or | LogicalOperator::And if expr.left.is_constant(true, ctx) => {
-                    ctx.diagnostic(ConstantShortCircuit(
+                    ctx.diagnostic(constant_short_circuit(
                         "truthiness",
                         expr.operator.as_str(),
                         expr.span,
@@ -92,7 +90,7 @@ impl Rule for NoConstantBinaryExpression {
                 LogicalOperator::Coalesce
                     if Self::has_constant_nullishness(&expr.left, false, ctx) =>
                 {
-                    ctx.diagnostic(ConstantShortCircuit(
+                    ctx.diagnostic(constant_short_circuit(
                         "nullishness",
                         expr.operator.as_str(),
                         expr.span,
@@ -112,12 +110,12 @@ impl Rule for NoConstantBinaryExpression {
                     Self::find_binary_expression_constant_operand(right, left, operator, ctx);
 
                 if right_constant_operand.is_some() {
-                    ctx.diagnostic(ConstantBinaryOperand("left", operator.as_str(), expr.span));
+                    ctx.diagnostic(constant_binary_operand("left", operator.as_str(), expr.span));
                     return;
                 }
 
                 if left_constant_operand.is_some() {
-                    ctx.diagnostic(ConstantBinaryOperand("right", operator.as_str(), expr.span));
+                    ctx.diagnostic(constant_binary_operand("right", operator.as_str(), expr.span));
                     return;
                 }
 
@@ -126,7 +124,7 @@ impl Rule for NoConstantBinaryExpression {
                     BinaryOperator::StrictEquality | BinaryOperator::StrictInequality
                 ) && (Self::is_always_new(left, ctx) || Self::is_always_new(right, ctx))
                 {
-                    ctx.diagnostic(ConstantAlwaysNew(expr.span));
+                    ctx.diagnostic(constant_always_new(expr.span));
                     return;
                 }
 
@@ -134,7 +132,7 @@ impl Rule for NoConstantBinaryExpression {
                     && Self::is_always_new(left, ctx)
                     && Self::is_always_new(right, ctx)
                 {
-                    ctx.diagnostic(ConstantBothAlwaysNew(expr.span));
+                    ctx.diagnostic(constant_both_always_new(expr.span));
                 }
             }
             _ => {}
@@ -190,7 +188,7 @@ impl NoConstantBinaryExpression {
                 .expressions
                 .iter()
                 .last()
-                .map_or(false, |last| Self::has_constant_nullishness(last, non_nullish, ctx)),
+                .is_some_and(|last| Self::has_constant_nullishness(last, non_nullish, ctx)),
             Expression::Identifier(_) => expr.evaluate_to_undefined(),
             _ => false,
         }
@@ -257,7 +255,7 @@ impl NoConstantBinaryExpression {
                 .expressions
                 .iter()
                 .last()
-                .map_or(false, |last| Self::has_constant_loose_boolean_comparison(last, ctx)),
+                .is_some_and(|last| Self::has_constant_loose_boolean_comparison(last, ctx)),
             Expression::ParenthesizedExpression(paren_expr) => {
                 Self::has_constant_loose_boolean_comparison(&paren_expr.expression, ctx)
             }
@@ -323,7 +321,7 @@ impl NoConstantBinaryExpression {
                 .expressions
                 .iter()
                 .last()
-                .map_or(false, |last| Self::has_constant_strict_boolean_comparison(last, ctx)),
+                .is_some_and(|last| Self::has_constant_strict_boolean_comparison(last, ctx)),
             Expression::ParenthesizedExpression(paren_expr) => {
                 Self::has_constant_strict_boolean_comparison(&paren_expr.expression, ctx)
             }
@@ -352,7 +350,7 @@ impl NoConstantBinaryExpression {
                 .expressions
                 .iter()
                 .last()
-                .map_or(false, |last| Self::is_always_new(last, ctx)),
+                .is_some_and(|last| Self::is_always_new(last, ctx)),
             Expression::AssignmentExpression(assignment_expr)
                 if assignment_expr.operator == AssignmentOperator::Assign =>
             {
@@ -657,5 +655,6 @@ fn test() {
         ("window.abc ?? 'non-nullish' ?? anything", None),
     ];
 
-    Tester::new(NoConstantBinaryExpression::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoConstantBinaryExpression::NAME, NoConstantBinaryExpression::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

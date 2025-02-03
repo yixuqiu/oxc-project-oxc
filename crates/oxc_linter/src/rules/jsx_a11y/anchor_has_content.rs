@@ -1,33 +1,26 @@
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
+use oxc_ast::{
+    ast::{JSXAttributeItem, JSXChild, JSXElement},
+    AstKind,
 };
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{
     context::LintContext,
+    fixer::{Fix, RuleFix},
     rule::Rule,
     utils::{
-        get_element_type, has_jsx_prop_lowercase, is_hidden_from_screen_reader,
+        get_element_type, has_jsx_prop_ignore_case, is_hidden_from_screen_reader,
         object_has_accessible_child,
     },
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum AnchorHasContentDiagnostic {
-    #[error("eslint-plugin-jsx-a11y(anchor-has-content): Missing accessible content when using `a` elements.")]
-    #[diagnostic(
-        severity(warning),
-        help("Provide screen reader accessible content when using `a` elements.")
-    )]
-    MissingContent(#[label] Span),
-
-    #[error("eslint-plugin-jsx-a11y(anchor-has-content): Missing accessible content when using `a` elements.")]
-    #[diagnostic(severity(warning), help("Remove the `aria-hidden` attribute to allow the anchor element and its content visible to assistive technologies."))]
-    RemoveAriaHidden(#[label] Span),
+fn missing_content(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Missing accessible content when using `a` elements.")
+        .with_help("Provide screen reader accessible content when using `a` elements.")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -64,16 +57,18 @@ declare_oxc_lint!(
     /// ```
     ///
     AnchorHasContent,
-    correctness
+    jsx_a11y,
+    correctness,
+    conditional_suggestion
 );
 
 impl Rule for AnchorHasContent {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::JSXElement(jsx_el) = node.kind() {
-            let Some(name) = &get_element_type(ctx, &jsx_el.opening_element) else { return };
+            let name = get_element_type(ctx, &jsx_el.opening_element);
+
             if name == "a" {
                 if is_hidden_from_screen_reader(ctx, &jsx_el.opening_element) {
-                    ctx.diagnostic(AnchorHasContentDiagnostic::RemoveAriaHidden(jsx_el.span));
                     return;
                 }
 
@@ -82,15 +77,46 @@ impl Rule for AnchorHasContent {
                 }
 
                 for attr in ["title", "aria-label"] {
-                    if has_jsx_prop_lowercase(&jsx_el.opening_element, attr).is_some() {
+                    if has_jsx_prop_ignore_case(&jsx_el.opening_element, attr).is_some() {
                         return;
                     };
                 }
 
-                ctx.diagnostic(AnchorHasContentDiagnostic::MissingContent(jsx_el.span));
+                let diagnostic = missing_content(jsx_el.span);
+                if jsx_el.children.len() == 1 {
+                    let child = &jsx_el.children[0];
+                    if let JSXChild::Element(child) = child {
+                        ctx.diagnostic_with_suggestion(diagnostic, |_fixer| {
+                            remove_hidden_attributes(child)
+                        });
+                        return;
+                    }
+                }
+
+                ctx.diagnostic(diagnostic);
             }
         }
     }
+}
+
+fn remove_hidden_attributes<'a>(element: &JSXElement<'a>) -> RuleFix<'a> {
+    element
+        .opening_element
+        .attributes
+        .iter()
+        .filter_map(JSXAttributeItem::as_attribute)
+        .filter_map(|attr| {
+            attr.name.as_identifier().and_then(|name| {
+                if name.name.eq_ignore_ascii_case("aria-hidden")
+                    || name.name.eq_ignore_ascii_case("hidden")
+                {
+                    Some(Fix::delete(attr.span))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
 }
 
 #[test]
@@ -117,12 +143,28 @@ fn test() {
         (r"<a title={title} />", None, None),
         (r"<a aria-label={ariaLabel} />", None, None),
         (r"<a title={title} aria-label={ariaLabel} />", None, None),
+        (r#"<a><Bar aria-hidden="false" /></a>"#, None, None),
+        // anchors can be hidden
+        (r"<a aria-hidden>Foo</a>", None, None),
+        (r#"<a aria-hidden="true">Foo</a>"#, None, None),
+        (r"<a hidden>Foo</a>", None, None),
+        (r"<a aria-hidden><span aria-hidden>Foo</span></a>", None, None),
+        (r#"<a hidden="true">Foo</a>"#, None, None),
+        (r#"<a hidden="">Foo</a>"#, None, None),
+        // TODO: should these be failing?
+        (r"<a><div hidden /></a>", None, None),
+        (r"<a><Bar hidden /></a>", None, None),
+        (r#"<a><Bar hidden="" /></a>"#, None, None),
+        (r#"<a><Bar hidden="until-hidden" /></a>"#, None, None),
     ];
 
     let fail = vec![
         (r"<a />", None, None),
         (r"<a><Bar aria-hidden /></a>", None, None),
+        (r#"<a><Bar aria-hidden="true" /></a>"#, None, None),
+        (r#"<a><input type="hidden" /></a>"#, None, None),
         (r"<a>{undefined}</a>", None, None),
+        (r"<a>{null}</a>", None, None),
         (
             r"<Link />",
             None,
@@ -132,5 +174,17 @@ fn test() {
         ),
     ];
 
-    Tester::new(AnchorHasContent::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (r"<a><Bar aria-hidden /></a>", "<a><Bar  /></a>"),
+        (r"<a><Bar aria-hidden>Can't see me</Bar></a>", r"<a><Bar >Can't see me</Bar></a>"),
+        (r"<a><Bar aria-hidden={true}>Can't see me</Bar></a>", r"<a><Bar >Can't see me</Bar></a>"),
+        (
+            r#"<a><Bar aria-hidden="true">Can't see me</Bar></a>"#,
+            r"<a><Bar >Can't see me</Bar></a>",
+        ),
+    ];
+
+    Tester::new(AnchorHasContent::NAME, AnchorHasContent::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

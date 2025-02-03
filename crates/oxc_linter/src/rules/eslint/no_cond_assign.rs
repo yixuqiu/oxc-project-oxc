@@ -2,19 +2,17 @@ use oxc_ast::{
     ast::{AssignmentExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-cond-assign): Expected a conditional expression and instead saw an assignment")]
-#[diagnostic(severity(warning), help("Consider wrapping the assignment in additional parentheses"))]
-struct NoCondAssignDiagnostic(#[label] pub Span);
+fn no_cond_assign_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Expected a conditional expression and instead saw an assignment")
+        .with_help("Consider wrapping the assignment in additional parentheses")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoCondAssign {
@@ -31,14 +29,27 @@ enum NoCondAssignConfig {
 declare_oxc_lint!(
     /// ### What it does
     ///
+    /// Disallow assignment operators in conditional expressions
     ///
     /// ### Why is this bad?
     ///
+    /// In conditional statements, it is very easy to mistype a comparison
+    /// operator (such as `==`) as an assignment operator (such as `=`).
+    ///
+    /// There are valid reasons to use assignment operators in conditional
+    /// statements. However, it can be difficult to tell whether a specific
+    /// assignment was intentional.
     ///
     /// ### Example
-    /// ```javascript
+    ///
+    /// ```js
+    /// // Check the user's job title
+    /// if (user.jobTitle = "manager") {
+    ///     // user.jobTitle is now incorrect
+    /// }
     /// ```
     NoCondAssign,
+    eslint,
     correctness
 );
 
@@ -68,20 +79,40 @@ impl Rule for NoCondAssign {
                 self.check_expression(ctx, expr.test.get_inner_expression());
             }
             AstKind::AssignmentExpression(expr) if self.config == NoCondAssignConfig::Always => {
-                for node_id in ctx.nodes().ancestors(node.id()).skip(1) {
-                    match ctx.nodes().kind(node_id) {
-                        AstKind::IfStatement(_)
-                        | AstKind::WhileStatement(_)
-                        | AstKind::DoWhileStatement(_)
-                        | AstKind::ForStatement(_)
-                        | AstKind::ConditionalExpression(_) => {
-                            Self::emit_diagnostic(ctx, expr);
+                let mut spans = vec![];
+                for ancestor in ctx.nodes().ancestors(node.id()).skip(1) {
+                    match ancestor.kind() {
+                        AstKind::IfStatement(if_stmt) => {
+                            spans.push(if_stmt.test.span());
+                        }
+                        AstKind::WhileStatement(while_stmt) => {
+                            spans.push(while_stmt.test.span());
+                        }
+                        AstKind::DoWhileStatement(do_while_stmt) => {
+                            spans.push(do_while_stmt.test.span());
+                        }
+                        AstKind::ForStatement(for_stmt) => {
+                            if let Some(test) = &for_stmt.test {
+                                spans.push(test.span());
+                            }
+                        }
+                        AstKind::ConditionalExpression(cond_expr) => {
+                            spans.push(cond_expr.span());
                         }
                         AstKind::Function(_)
                         | AstKind::ArrowFunctionExpression(_)
-                        | AstKind::Program(_) => break,
+                        | AstKind::Program(_)
+                        | AstKind::BlockStatement(_) => {
+                            break;
+                        }
                         _ => {}
-                    }
+                    };
+                }
+
+                // Only report the diagnostic if the assignment is in a span where it should not be.
+                // For example, report `if (a = b) { ... }`, not `if (...) { a = b }`
+                if spans.iter().any(|span| span.contains_inclusive(node.span())) {
+                    Self::emit_diagnostic(ctx, expr);
                 }
             }
             _ => {}
@@ -99,8 +130,9 @@ impl NoCondAssign {
         operator_span.start += start;
         operator_span.end = operator_span.start + expr.operator.as_str().len() as u32;
 
-        ctx.diagnostic(NoCondAssignDiagnostic(operator_span));
+        ctx.diagnostic(no_cond_assign_diagnostic(operator_span));
     }
+
     fn check_expression(&self, ctx: &LintContext<'_>, expr: &Expression<'_>) {
         let mut expr = expr;
         if self.config == NoCondAssignConfig::Always {
@@ -160,6 +192,34 @@ fn test() {
         ("switch (foo) { case a = b: bar(); }", Some(serde_json::json!(["except-parens"]))),
         ("switch (foo) { case a = b: bar(); }", Some(serde_json::json!(["always"]))),
         ("switch (foo) { case baz + (a = b): bar(); }", Some(serde_json::json!(["always"]))),
+        // not in condition
+        ("if (obj.key) { (obj.key=false) }", Some(serde_json::json!(["always"]))),
+        ("for (;;) { (obj.key=false) }", Some(serde_json::json!(["always"]))),
+        ("while (obj.key) { (obj.key=false) }", Some(serde_json::json!(["always"]))),
+        ("do { (obj.key=false) } while (obj.key)", Some(serde_json::json!(["always"]))),
+        // https://github.com/oxc-project/oxc/issues/6656
+        (
+            "
+            if (['a', 'b', 'c', 'd'].includes(value)) newValue = value;
+            else newValue = 'default';
+            ",
+            Some(serde_json::json!(["always"])),
+        ),
+        ("while(true) newValue = value;", Some(serde_json::json!(["always"]))),
+        (
+            "
+            for(;;) newValue = value;
+            ",
+            Some(serde_json::json!(["always"])),
+        ),
+        ("for (; (typeof l === 'undefined' ? (l = 0) : l); i++) { }", None),
+        ("for (x = 0;x<10;x++) { x = 0 }", None),
+        ("for (x = 0;x<10;(x = x + 1)) { x = 0 }", None),
+        ("const nums = [1,2,3]; for(let i = 0; i < nums.length; i += 1) { dosomething(); }", None),
+        (
+            "for (let i = 0; i < nums.length; i += 1) { dosomething();}",
+            Some(serde_json::json!(["always"])),
+        ),
     ];
 
     let fail = vec![
@@ -191,5 +251,5 @@ fn test() {
         ("(((3496.29)).bkufyydt = 2e308) ? foo : bar;", None),
     ];
 
-    Tester::new(NoCondAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoCondAssign::NAME, NoCondAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

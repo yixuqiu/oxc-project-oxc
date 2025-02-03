@@ -1,19 +1,18 @@
-use lazy_static::lazy_static;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{Atom, Span};
-use regex::Regex;
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(jsx-no-comment-textnodes): Comments inside children section of tag should be placed inside braces")]
-#[diagnostic(severity(warning))]
-struct JsxNoCommentTextnodesDiagnostic(#[label] pub Span);
+fn jsx_no_comment_textnodes_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Comments inside children section of tag should be placed inside braces")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct JsxNoCommentTextnodes;
@@ -28,7 +27,7 @@ declare_oxc_lint!(
     /// In JSX, any text node that is not wrapped in curly braces is considered a literal string to be rendered. This can lead to unexpected behavior when the text contains a comment.
     ///
     /// ### Example
-    /// ```javascript
+    /// ```jsx
     /// // Incorrect:
     ///
     /// const Hello = () => {
@@ -50,24 +49,32 @@ declare_oxc_lint!(
     /// }
     /// ```
     JsxNoCommentTextnodes,
+    react,
     suspicious
 );
 
 impl Rule for JsxNoCommentTextnodes {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::JSXText(jsx_text) = node.kind() else { return };
+        let AstKind::JSXText(jsx_text) = node.kind() else {
+            return;
+        };
 
-        if control_patterns(&jsx_text.value) {
-            ctx.diagnostic(JsxNoCommentTextnodesDiagnostic(jsx_text.span));
+        if has_comment_pattern(&jsx_text.value) {
+            ctx.diagnostic(jsx_no_comment_textnodes_diagnostic(jsx_text.span));
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
     }
 }
 
-fn control_patterns(pattern: &Atom) -> bool {
-    lazy_static! {
-        static ref CTL_PAT: Regex = Regex::new(r"(?m)^\s*/(/|\*)",).unwrap();
-    }
-    CTL_PAT.is_match(pattern.as_str())
+/// Returns true if the given text contains a comment pattern such as `//` or `/*`.
+fn has_comment_pattern(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("//") || line.starts_with("/*")
+    })
 }
 
 #[test]
@@ -309,5 +316,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(JsxNoCommentTextnodes::NAME, pass, fail).test_and_snapshot();
+    Tester::new(JsxNoCommentTextnodes::NAME, JsxNoCommentTextnodes::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

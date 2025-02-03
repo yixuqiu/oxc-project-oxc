@@ -2,19 +2,20 @@ use oxc_ast::{
     ast::{ArrayExpressionElement, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{ast_util::get_declaration_of_variable, context::LintContext, rule::Rule, AstNode};
+use crate::{
+    ast_util::get_declaration_of_variable, context::LintContext, fixer::Fix, rule::Rule, AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-set-size): Use `Set#size` instead of converting a `Set` to an array and using its `length` property.")]
-#[diagnostic(severity(warning))]
-struct PreferSetSizeDiagnostic(#[label] pub Span);
+fn prefer_set_size_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Use `Set#size` instead of converting a `Set` to an array and using its `length` property.",
+    )
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferSetSize;
@@ -28,17 +29,21 @@ declare_oxc_lint!(
     ///
     /// Using `Set#size` is more readable and performant.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// const length = [...new Set([1, 2, 3])].length;
+    /// ```
     ///
-    /// // good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const size = new Set([1, 2, 3]).size;
-    ///
     /// ```
     PreferSetSize,
-    correctness
+    unicorn,
+    correctness,
+    fix
 );
 
 impl Rule for PreferSetSize {
@@ -55,7 +60,7 @@ impl Rule for PreferSetSize {
             return;
         }
 
-        let Expression::ArrayExpression(array_expr) = member_expr.object().without_parenthesized()
+        let Expression::ArrayExpression(array_expr) = member_expr.object().without_parentheses()
         else {
             return;
         };
@@ -68,17 +73,26 @@ impl Rule for PreferSetSize {
             return;
         };
 
-        let maybe_set = &spread_element.argument.without_parenthesized();
+        let maybe_set = &spread_element.argument.get_inner_expression();
 
         if !is_set(maybe_set, ctx) {
             return;
         }
 
-        ctx.diagnostic(PreferSetSizeDiagnostic(span));
+        ctx.diagnostic_with_fix(prefer_set_size_diagnostic(span), |_fixer| {
+            vec![
+                // remove [...
+                Fix::delete(Span::new(array_expr.span.start, spread_element.span.start + 3)),
+                // remove everything after the end of the spread element (including the `]` )
+                Fix::delete(Span::new(spread_element.span.end, array_expr.span.end)),
+                // replace .length with .size
+                Fix::new("size", span),
+            ]
+        });
     }
 }
 
-fn is_set(maybe_set: &Expression, ctx: &LintContext) -> bool {
+fn is_set<'a>(maybe_set: &Expression<'a>, ctx: &LintContext<'a>) -> bool {
     if let Expression::NewExpression(new_expr) = maybe_set {
         if let Expression::Identifier(identifier) = &new_expr.callee {
             return identifier.name == "Set";
@@ -157,5 +171,19 @@ fn test() {
         r"[...new /* comment */ Set(array)].length",
     ];
 
-    Tester::new(PreferSetSize::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (r"[...new Set(array)].length", r"new Set(array).size"),
+        (r"[...new Set(array),].length", r"new Set(array).size"),
+        (r"[...(( new Set(array) ))].length", r"(( new Set(array) )).size"),
+        (r"[...(( new Set(array as foo) ))].length", r"(( new Set(array as foo) )).size"),
+        (r"[...(( new Set(array) as foo ))].length", r"(( new Set(array) as foo )).size"),
+        (
+            r"[...(( new Set(array) as foo )     )     ]    .length;",
+            r"(( new Set(array) as foo )     )    .size;",
+        ),
+    ];
+
+    Tester::new(PreferSetSize::NAME, PreferSetSize::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

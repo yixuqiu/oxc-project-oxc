@@ -1,6 +1,6 @@
 use std::{
-    collections::HashSet,
-    fs::{self, File},
+    borrow::Cow,
+    fs,
     io::{stdout, Read, Write},
     panic::UnwindSafe,
     path::{Path, PathBuf},
@@ -10,35 +10,27 @@ use std::{
 use console::Style;
 use encoding_rs::UTF_16LE;
 use encoding_rs_io::DecodeReaderBytesBuilder;
-use futures::future::join_all;
+use oxc::{
+    diagnostics::{GraphicalReportHandler, GraphicalTheme, NamedSource},
+    span::SourceType,
+};
+use oxc_tasks_common::{normalize_path, Snapshot};
 use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 
-use oxc_allocator::Allocator;
-use oxc_ast::Trivias;
-use oxc_diagnostics::{miette::NamedSource, GraphicalReportHandler, GraphicalTheme};
-use oxc_parser::Parser;
-use oxc_semantic::SemanticBuilder;
-use oxc_span::{SourceType, Span};
-use oxc_tasks_common::normalize_path;
+use crate::{snap_root, workspace_root, AppArgs, Driver};
 
-use crate::{project_root, AppArgs};
-
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum TestResult {
     ToBeRun,
     Passed,
     IncorrectlyPassed,
-    #[allow(unused)]
-    Mismatch(String, String),
+    Mismatch(/* case */ &'static str, /* actual */ String, /* expected */ String),
     ParseError(String, /* panicked */ bool),
     CorrectError(String, /* panicked */ bool),
-    RuntimeError(String),
-    CodegenError(/* reason */ &'static str),
-    DuplicatedComments(String),
-    Snapshot(String),
+    GenericError(/* case */ &'static str, /* error */ String),
 }
 
 pub struct CoverageReport<'a, T> {
@@ -55,33 +47,28 @@ pub struct CoverageReport<'a, T> {
 pub trait Suite<T: Case> {
     fn run(&mut self, name: &str, args: &AppArgs) {
         self.read_test_cases(name, args);
-        let cases = self.get_test_cases_mut();
-        for case in cases {
+        self.get_test_cases_mut().par_iter_mut().for_each(|case| {
+            if args.debug {
+                println!("{}", case.path().to_string_lossy());
+            }
             case.run();
-        }
+        });
         self.run_coverage(name, args);
     }
 
-    fn run_async(&mut self, name: &str, args: &AppArgs) {
-        let rt = Runtime::new().unwrap();
-        self.read_test_cases(name, args);
-
-        let cases = self.get_test_cases_mut();
-
-        rt.block_on(async {
-            join_all(cases.iter_mut().map(T::run_async)).await;
-        });
-
-        self.run_coverage(name, args);
+    fn run_async(&mut self, args: &AppArgs) {
+        use futures::{stream, StreamExt};
+        self.read_test_cases("runtime", args);
+        let cases = self.get_test_cases_mut().iter_mut().map(T::run_async);
+        Runtime::new().unwrap().block_on(stream::iter(cases).buffer_unordered(100).count());
+        self.run_coverage("runtime", args);
+        let _ = oxc_tasks_common::agent().delete("http://localhost:32055").call();
     }
 
     fn run_coverage(&self, name: &str, args: &AppArgs) {
         let report = self.coverage_report();
-
         let mut out = stdout();
-
         self.print_coverage(name, args, &report, &mut out).unwrap();
-
         if args.filter.is_none() {
             self.snapshot_errors(name, &report).unwrap();
         }
@@ -94,13 +81,15 @@ pub trait Suite<T: Case> {
     }
 
     fn save_test_cases(&mut self, cases: Vec<T>);
+    fn save_extra_test_cases(&mut self) {}
 
     fn read_test_cases(&mut self, name: &str, args: &AppArgs) {
-        let test_root = self.get_test_root();
+        let test_path = workspace_root();
+        let cases_path = test_path.join(self.get_test_root());
 
         let get_paths = || {
             let filter = args.filter.as_ref();
-            WalkDir::new(test_root)
+            WalkDir::new(&cases_path)
                 .into_iter()
                 .filter_map(Result::ok)
                 .filter(|e| !e.file_type().is_dir())
@@ -144,15 +133,18 @@ pub trait Suite<T: Case> {
                     content
                 });
 
-                let path = path.strip_prefix(test_root).unwrap().to_owned();
+                let path = path.strip_prefix(&test_path).unwrap().to_owned();
                 // remove the Byte Order Mark in some of the TypeScript files
-                let code = code.trim_start_matches(|c| c == '\u{feff}').to_string();
+                let code = code.trim_start_matches('\u{feff}').to_string();
                 T::new(path, code)
             })
             .filter(|case| !case.skip_test_case())
             .collect::<Vec<_>>();
 
         self.save_test_cases(cases);
+        if args.filter.is_none() {
+            self.save_extra_test_cases();
+        }
     }
 
     fn get_test_cases_mut(&mut self) -> &mut Vec<T>;
@@ -193,7 +185,7 @@ pub trait Suite<T: Case> {
     }
 
     /// # Errors
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(clippy::cast_precision_loss)]
     fn print_coverage<W: Write>(
         &self,
         name: &str,
@@ -241,8 +233,10 @@ pub trait Suite<T: Case> {
 
     /// # Errors
     fn snapshot_errors(&self, name: &str, report: &CoverageReport<T>) -> std::io::Result<()> {
-        let path = project_root().join(format!("tasks/coverage/{}.snap", name.to_lowercase()));
-        let mut file = File::create(path).unwrap();
+        let snapshot_path = workspace_root().join(self.get_test_root());
+
+        let show_commit = !snapshot_path.to_string_lossy().contains("misc");
+        let snapshot = Snapshot::new(&snapshot_path, show_commit);
 
         let mut tests = self
             .get_test_cases()
@@ -252,18 +246,20 @@ pub trait Suite<T: Case> {
 
         tests.sort_by_key(|case| case.path());
 
-        let args = AppArgs { detail: true, ..AppArgs::default() };
-        self.print_coverage(name, &args, report, &mut file)?;
+        let mut out: Vec<u8> = vec![];
 
-        let mut out = String::new();
+        let args = AppArgs { detail: true, ..AppArgs::default() };
+        self.print_coverage(name, &args, report, &mut out)?;
+
         for case in &tests {
             if let TestResult::CorrectError(error, _) = &case.test_result() {
-                out.push_str(error);
+                out.extend(error.as_bytes());
             }
         }
 
-        file.write_all(out.as_bytes())?;
-        file.flush()?;
+        let path = snap_root().join(format!("{}.snap", name.to_lowercase()));
+        let out = String::from_utf8(out).unwrap();
+        snapshot.save(&path, &out);
         Ok(())
     }
 }
@@ -284,6 +280,13 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
     }
 
     fn skip_test_case(&self) -> bool {
+        false
+    }
+
+    /// Mark strict mode as always strict
+    ///
+    /// See <https://github.com/tc39/test262/blob/05c45a4c430ab6fee3e0c7f0d47d8a30d8876a6d/INTERPRETING.md#strict-mode>
+    fn always_strict(&self) -> bool {
         false
     }
 
@@ -308,33 +311,30 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
     fn run(&mut self);
 
     /// Async version of run
-    #[allow(clippy::unused_async)]
+    #[expect(clippy::unused_async)]
     async fn run_async(&mut self) {}
 
     /// Execute the parser once and get the test result
     fn execute(&mut self, source_type: SourceType) -> TestResult {
-        let allocator = Allocator::default();
-        let source_text = self.code();
-        let parser_ret = Parser::new(&allocator, source_text, source_type)
-            .allow_return_outside_function(self.allow_return_outside_function())
-            .parse();
-        if let Some(res) = self.check_comments(&parser_ret.trivias) {
-            return res;
-        }
+        let path = self.path();
 
-        // Make sure serialization doesn't crash; also for code coverage.
-        let _serializer = parser_ret.program.serializer();
+        let mut driver = Driver {
+            path: path.to_path_buf(),
+            allow_return_outside_function: self.allow_return_outside_function(),
+            ..Driver::default()
+        };
 
-        let program = allocator.alloc(parser_ret.program);
-        let semantic_ret = SemanticBuilder::new(source_text, source_type)
-            .with_trivias(parser_ret.trivias)
-            .with_check_syntax_error(true)
-            .build_module_record(PathBuf::new(), program)
-            .build(program);
-        if let Some(res) = self.check_semantic(&semantic_ret.semantic) {
-            return res;
-        }
-        let errors = parser_ret.errors.into_iter().chain(semantic_ret.errors).collect::<Vec<_>>();
+        let source_text = if self.always_strict() {
+            // To run in strict mode, the test contents must be modified prior to execution--
+            // a "use strict" directive must be inserted as the initial character sequence of the file,
+            // followed by a semicolon (;) and newline character (\n): "use strict";
+            Cow::Owned(format!("'use strict';\n{}", self.code()))
+        } else {
+            Cow::Borrowed(self.code())
+        };
+
+        driver.run(&source_text, source_type);
+        let errors = driver.errors();
 
         let result = if errors.is_empty() {
             Ok(String::new())
@@ -344,7 +344,7 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
             let mut output = String::new();
             for error in errors {
                 let error = error.with_source_code(NamedSource::new(
-                    normalize_path(self.path()),
+                    normalize_path(path),
                     source_text.to_string(),
                 ));
                 handler.render_report(&mut output, error.as_ref()).unwrap();
@@ -354,8 +354,8 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
 
         let should_fail = self.should_fail();
         match result {
-            Err(err) if should_fail => TestResult::CorrectError(err, parser_ret.panicked),
-            Err(err) if !should_fail => TestResult::ParseError(err, parser_ret.panicked),
+            Err(err) if should_fail => TestResult::CorrectError(err, driver.panicked),
+            Err(err) if !should_fail => TestResult::ParseError(err, driver.panicked),
             Ok(_) if should_fail => TestResult::IncorrectlyPassed,
             Ok(_) if !should_fail => TestResult::Passed,
             _ => unreachable!(),
@@ -363,47 +363,25 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
     }
 
     fn print<W: Write>(&self, args: &AppArgs, writer: &mut W) -> std::io::Result<()> {
+        let path = normalize_path(Path::new("tasks/coverage").join(self.path()));
         match self.test_result() {
             TestResult::ParseError(error, _) => {
-                writer.write_all(
-                    format!("Expect to Parse: {:?}\n", normalize_path(self.path())).as_bytes(),
-                )?;
+                writer.write_all(format!("Expect to Parse: {path}\n").as_bytes())?;
                 writer.write_all(error.as_bytes())?;
             }
-            TestResult::Mismatch(ast_string, expected_ast_string) => {
+            TestResult::Mismatch(case, ast_string, expected_ast_string) => {
+                writer.write_all(format!("{case}: {path}\n",).as_bytes())?;
                 if args.diff {
                     self.print_diff(writer, ast_string.as_str(), expected_ast_string.as_str())?;
-                    println!("Mismatch: {:?}", normalize_path(self.path()));
+                    println!("{case}: {path}");
                 }
             }
-            TestResult::RuntimeError(error) => {
-                writer.write_all(
-                    format!("Expect to run correctly: {:?}\n", normalize_path(self.path()))
-                        .as_bytes(),
-                )?;
-                writer.write_all(format!("But got a runtime error: {error}\n\n").as_bytes())?;
+            TestResult::GenericError(case, error) => {
+                writer.write_all(format!("{path}\n").as_bytes())?;
+                writer.write_all(format!("{case} error: {error}\n\n").as_bytes())?;
             }
             TestResult::IncorrectlyPassed => {
-                writer.write_all(
-                    format!("Expect Syntax Error: {:?}\n", normalize_path(self.path())).as_bytes(),
-                )?;
-            }
-            TestResult::CodegenError(reason) => {
-                writer.write_all(
-                    format!("{reason} failed: {:?}\n", normalize_path(self.path())).as_bytes(),
-                )?;
-            }
-            TestResult::Snapshot(snapshot) => {
-                writer.write_all(snapshot.as_bytes())?;
-            }
-            TestResult::DuplicatedComments(comment) => {
-                writer.write_all(
-                    format!(
-                        "Duplicated comments \"{comment}\": {:?}\n",
-                        normalize_path(self.path())
-                    )
-                    .as_bytes(),
-                )?;
+                writer.write_all(format!("Expect Syntax Error: {path}\n").as_bytes())?;
             }
             TestResult::Passed | TestResult::ToBeRun | TestResult::CorrectError(..) => {}
         }
@@ -416,7 +394,7 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
         origin_string: &str,
         expected_string: &str,
     ) -> std::io::Result<()> {
-        let diff = TextDiff::from_lines(origin_string, expected_string);
+        let diff = TextDiff::from_lines(expected_string, origin_string);
         for change in diff.iter_all_changes() {
             let (sign, style) = match change.tag() {
                 ChangeTag::Delete => ("-", Style::new().red()),
@@ -428,21 +406,5 @@ pub trait Case: Sized + Sync + Send + UnwindSafe {
             )?;
         }
         Ok(())
-    }
-
-    fn check_semantic(&self, _semantic: &oxc_semantic::Semantic<'_>) -> Option<TestResult> {
-        None
-    }
-
-    fn check_comments(&self, trivias: &Trivias) -> Option<TestResult> {
-        let mut uniq: HashSet<Span> = HashSet::new();
-        for (_, span) in trivias.comments() {
-            if !uniq.insert(span) {
-                return Some(TestResult::DuplicatedComments(
-                    span.source_text(self.code()).to_string(),
-                ));
-            }
-        }
-        None
     }
 }

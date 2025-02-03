@@ -2,40 +2,37 @@ use oxc_ast::{
     ast::{Argument, CallExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{
     context::LintContext,
-    fixer::Fix,
     rule::Rule,
     utils::{
-        collect_possible_jest_call_node, is_equality_matcher, parse_expect_jest_fn_call,
-        KnownMemberExpressionProperty, ParsedExpectFnCall, PossibleJestNode,
+        is_equality_matcher, parse_expect_jest_fn_call, KnownMemberExpressionProperty,
+        ParsedExpectFnCall, PossibleJestNode,
     },
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferToBeDiagnostic {
-    #[error("eslint-plugin-jest(prefer-to-be): Use `toBe` when expecting primitive literals.")]
-    #[diagnostic(severity(warning))]
-    UseToBe(#[label] Span),
-    #[error("eslint-plugin-jest(prefer-to-be): Use `toBeUndefined` instead.")]
-    #[diagnostic(severity(warning))]
-    UseToBeUndefined(#[label] Span),
-    #[error("eslint-plugin-jest(prefer-to-be): Use `toBeDefined` instead.")]
-    #[diagnostic(severity(warning))]
-    UseToBeDefined(#[label] Span),
-    #[error("eslint-plugin-jest(prefer-to-be): Use `toBeNull` instead.")]
-    #[diagnostic(severity(warning))]
-    UseToBeNull(#[label] Span),
-    #[error("eslint-plugin-jest(prefer-to-be): Use `toBeNaN` instead.")]
-    #[diagnostic(severity(warning))]
-    UseToBeNaN(#[label] Span),
+fn use_to_be(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `toBe` when expecting primitive literals.").with_label(span)
+}
+
+fn use_to_be_undefined(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `toBeUndefined` instead.").with_label(span)
+}
+
+fn use_to_be_defined(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `toBeDefined` instead.").with_label(span)
+}
+
+fn use_to_be_null(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `toBeNull` instead.").with_label(span)
+}
+
+fn use_to_be_na_n(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Use `toBeNaN` instead.").with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -68,7 +65,9 @@ declare_oxc_lint!(
     /// expect(loadMessage()).resolves.toEqual('hello world');
     /// ```
     PreferToBe,
+    jest,
     style,
+    fix
 );
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,10 +80,12 @@ enum PreferToBeKind {
 }
 
 impl Rule for PreferToBe {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -193,7 +194,7 @@ impl PreferToBe {
 
         matches!(
             expr,
-            Expression::BigintLiteral(_)
+            Expression::BigIntLiteral(_)
                 | Expression::BooleanLiteral(_)
                 | Expression::NumericLiteral(_)
                 | Expression::NullLiteral(_)
@@ -224,39 +225,40 @@ impl PreferToBe {
         let maybe_not_modifier = modifiers.iter().find(|modifier| modifier.is_name_equal("not"));
 
         if kind == &PreferToBeKind::Undefined {
-            ctx.diagnostic_with_fix(PreferToBeDiagnostic::UseToBeUndefined(span), || {
+            ctx.diagnostic_with_fix(use_to_be_undefined(span), |fixer| {
                 let new_matcher =
                     if is_cmp_mem_expr { "[\"toBeUndefined\"]()" } else { "toBeUndefined()" };
-                if let Some(not_modifier) = maybe_not_modifier {
-                    Fix::new(new_matcher.to_string(), Span::new(not_modifier.span.start, end))
+                let span = if let Some(not_modifier) = maybe_not_modifier {
+                    Span::new(not_modifier.span.start, end)
                 } else {
-                    Fix::new(new_matcher.to_string(), Span::new(span.start, end))
-                }
+                    Span::new(span.start, end)
+                };
+                fixer.replace(span, new_matcher)
             });
         } else if kind == &PreferToBeKind::Defined {
-            ctx.diagnostic_with_fix(PreferToBeDiagnostic::UseToBeDefined(span), || {
+            ctx.diagnostic_with_fix(use_to_be_defined(span), |fixer| {
                 let (new_matcher, start) = if is_cmp_mem_expr {
                     ("[\"toBeDefined\"]()", modifiers.first().unwrap().span.end)
                 } else {
                     ("toBeDefined()", maybe_not_modifier.unwrap().span.start)
                 };
 
-                Fix::new(new_matcher.to_string(), Span::new(start, end))
+                fixer.replace(Span::new(start, end), new_matcher)
             });
         } else if kind == &PreferToBeKind::Null {
-            ctx.diagnostic_with_fix(PreferToBeDiagnostic::UseToBeNull(span), || {
+            ctx.diagnostic_with_fix(use_to_be_null(span), |fixer| {
                 let new_matcher = if is_cmp_mem_expr { "\"toBeNull\"]()" } else { "toBeNull()" };
-                Fix::new(new_matcher.to_string(), Span::new(span.start, end))
+                fixer.replace(Span::new(span.start, end), new_matcher)
             });
         } else if kind == &PreferToBeKind::NaN {
-            ctx.diagnostic_with_fix(PreferToBeDiagnostic::UseToBeNaN(span), || {
+            ctx.diagnostic_with_fix(use_to_be_na_n(span), |fixer| {
                 let new_matcher = if is_cmp_mem_expr { "\"toBeNaN\"]()" } else { "toBeNaN()" };
-                Fix::new(new_matcher.to_string(), Span::new(span.start, end))
+                fixer.replace(Span::new(span.start, end), new_matcher)
             });
         } else {
-            ctx.diagnostic_with_fix(PreferToBeDiagnostic::UseToBe(span), || {
+            ctx.diagnostic_with_fix(use_to_be(span), |fixer| {
                 let new_matcher = if is_cmp_mem_expr { "\"toBe\"" } else { "toBe" };
-                Fix::new(new_matcher.to_string(), span)
+                fixer.replace(span, new_matcher)
             });
         }
     }
@@ -331,7 +333,10 @@ fn tests() {
         ("expect(undefined).toBe", None),
         ("expect(\"something\");", None),
         // typescript edition
-        ("(expect('Model must be bound to an array if the multiple property is true') as any).toHaveBeenTipped()", None),
+        (
+            "(expect('Model must be bound to an array if the multiple property is true') as any).toHaveBeenTipped()",
+            None,
+        ),
     ];
 
     let fail = vec![
@@ -548,7 +553,7 @@ fn tests() {
         ),
     ];
 
-    Tester::new(PreferToBe::NAME, pass, fail)
+    Tester::new(PreferToBe::NAME, PreferToBe::PLUGIN, pass, fail)
         .with_jest_plugin(true)
         .expect_fix(fix)
         .test_and_snapshot();

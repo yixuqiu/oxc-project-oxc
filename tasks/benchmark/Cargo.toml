@@ -1,49 +1,45 @@
 [package]
-name                  = "oxc_benchmark"
-version               = "0.0.0"
-publish               = false
-authors.workspace     = true
+name = "oxc_benchmark"
+version = "0.0.0"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
 description.workspace = true
-edition.workspace     = true
-homepage.workspace    = true
-keywords.workspace    = true
-license.workspace     = true
-repository.workspace  = true
 
 [lints]
 workspace = true
 
 [lib]
-test    = false
-bench   = false
+test = false
+bench = false
 doctest = false
 
 [[bench]]
-name    = "lexer"
+name = "lexer"
 harness = false
 
 [[bench]]
-name    = "parser"
+name = "parser"
 harness = false
 
 [[bench]]
-name    = "transformer"
+name = "transformer"
 harness = false
 
 [[bench]]
-name    = "semantic"
+name = "semantic"
 harness = false
 
 [[bench]]
-name    = "linter"
+name = "linter"
 harness = false
 
 [[bench]]
-name    = "codegen_sourcemap"
-harness = false
-
-[[bench]]
-name    = "sourcemap"
+name = "codegen"
 harness = false
 
 # Broken
@@ -52,48 +48,105 @@ harness = false
 # harness = false
 
 [[bench]]
-name    = "minifier"
+name = "minifier"
+harness = false
+
+[[bench]]
+name = "isolated_declarations"
 harness = false
 
 # Only run in CI
 [[bench]]
-name    = "parser_napi"
+name = "parser_napi"
 harness = false
-bench   = false
+bench = false
 
+# All `oxc_*` dependencies optional as on CI we build each benchmark separately
+# with only the crates it needs, to speed up the builds
 [dependencies]
-# All optional as `parser_napi` pseudo-benchmark doesn't need any of them,
-# and including them in compilation adds 1 minute to building that benchmark on CI.
-# See `tasks/benchmark/benches/parser_napi.rs`.
-oxc_allocator    = { workspace = true, optional = true }
-oxc_linter       = { workspace = true, optional = true }
-oxc_minifier     = { workspace = true, optional = true }
-oxc_parser       = { workspace = true, features = ["benchmarking"], optional = true }
-oxc_prettier     = { workspace = true, optional = true }
-oxc_semantic     = { workspace = true, optional = true }
-oxc_span         = { workspace = true, optional = true }
+oxc_allocator = { workspace = true, optional = true }
+oxc_ast = { workspace = true, optional = true, features = ["serialize"] }
+oxc_codegen = { workspace = true, optional = true }
+oxc_isolated_declarations = { workspace = true, optional = true }
+oxc_linter = { workspace = true, optional = true }
+oxc_mangler = { workspace = true, optional = true }
+oxc_minifier = { workspace = true, optional = true }
+oxc_parser = { workspace = true, features = ["benchmarking"], optional = true }
+oxc_prettier = { workspace = true, optional = true }
+oxc_semantic = { workspace = true, optional = true }
+oxc_span = { workspace = true, optional = true, features = ["schemars", "serialize"] }
 oxc_tasks_common = { workspace = true, optional = true }
-oxc_transformer  = { workspace = true, optional = true }
-oxc_codegen      = { workspace = true, optional = true }
-oxc_sourcemap    = { workspace = true, optional = true }
+oxc_transformer = { workspace = true, optional = true }
 
-criterion  = { package = "criterion2", version = "0.8.0", default-features = false }
-serde      = { workspace = true, optional = true }
+criterion2 = { workspace = true }
+
+# Only for NAPI benchmark
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [features]
 default = [
   "dep:oxc_allocator",
+  "dep:oxc_ast",
+  "dep:oxc_codegen",
+  "dep:oxc_isolated_declarations",
   "dep:oxc_linter",
   "dep:oxc_minifier",
+  "dep:oxc_mangler",
   "dep:oxc_parser",
   "dep:oxc_prettier",
   "dep:oxc_semantic",
   "dep:oxc_span",
   "dep:oxc_tasks_common",
   "dep:oxc_transformer",
-  "dep:oxc_codegen",
-  "dep:oxc_sourcemap",
 ]
-codspeed = ["criterion/codspeed"]
-codspeed_napi = ["criterion/codspeed", "dep:serde", "dep:serde_json"]
+codspeed = ["criterion2/codspeed"]
+codspeed_napi = ["criterion2/codspeed", "dep:serde", "dep:serde_json"]
+
+# Features for running each benchmark separately with minimum dependencies that benchmark needs.
+# e.g. `cargo build --release -p oxc_benchmark --bench parser --no-default-features --features parser`
+lexer = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_tasks_common"]
+parser = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_parser", "dep:oxc_span", "dep:oxc_tasks_common"]
+transformer = [
+  "dep:oxc_allocator",
+  "dep:oxc_parser",
+  "dep:oxc_semantic",
+  "dep:oxc_span",
+  "dep:oxc_tasks_common",
+  "dep:oxc_transformer",
+]
+semantic = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_span", "dep:oxc_tasks_common"]
+minifier = [
+  "dep:oxc_allocator",
+  "dep:oxc_minifier",
+  "dep:oxc_mangler",
+  "dep:oxc_parser",
+  "dep:oxc_semantic",
+  "dep:oxc_span",
+  "dep:oxc_tasks_common",
+]
+codegen = [
+  "dep:oxc_allocator",
+  "dep:oxc_codegen",
+  "dep:oxc_parser",
+  "dep:oxc_semantic",
+  "dep:oxc_span",
+  "dep:oxc_tasks_common",
+  "dep:oxc_transformer",
+]
+linter = [
+  "dep:oxc_allocator",
+  "dep:oxc_linter",
+  "dep:oxc_parser",
+  "dep:oxc_semantic",
+  "dep:oxc_span",
+  "dep:oxc_tasks_common",
+]
+prettier = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_prettier", "dep:oxc_span", "dep:oxc_tasks_common"]
+isolated_declarations = [
+  "dep:oxc_allocator",
+  "dep:oxc_isolated_declarations",
+  "dep:oxc_parser",
+  "dep:oxc_span",
+  "dep:oxc_tasks_common",
+]

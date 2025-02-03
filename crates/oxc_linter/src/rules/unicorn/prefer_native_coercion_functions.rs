@@ -1,25 +1,24 @@
 use oxc_ast::{
-    ast::{Argument, BindingPatternKind, Expression, FormalParameters, FunctionBody, Statement},
+    ast::{Argument, Expression, FormalParameters, FunctionBody, Statement},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::AstNodeId;
-use oxc_span::{Atom, Span};
+use oxc_semantic::NodeId;
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{context::LintContext, rule::Rule, utils::get_first_parameter_name, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferNativeCoercionFunctionsDiagnostic {
-    #[error("eslint-plugin-unicorn(prefer-native-coercion-functions): The function is equivalent to `{1}`. Call `{1}` directly.")]
-    #[diagnostic(severity(warning))]
-    Function(#[label] Span, &'static str),
-    #[error("eslint-plugin-unicorn(prefer-native-coercion-functions): The arrow function in the callback of the array is equivalent to `Boolean`. Replace the callback with `Boolean`.")]
-    #[diagnostic(severity(warning))]
-    ArrayCallback(#[label] Span),
+fn function(span: Span, called_fn: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "The function is equivalent to `{called_fn}`. Call `{called_fn}` directly."
+    ))
+    .with_label(span)
+}
+
+fn array_callback(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("The arrow function in the callback of the array is equivalent to `Boolean`. Replace the callback with `Boolean`.")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -35,21 +34,26 @@ declare_oxc_lint!(
     /// If a function is equivalent to [`String`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String), [`Number`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number), [`BigInt`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt), [`Boolean`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Boolean), or [`Symbol`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol), you should use the built-in one directly.
     /// Wrapping the built-in in a function is moot.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// const foo = v => String(v);
     /// foo(1);
     /// const foo = v => Number(v);
     /// array.some((v, ) => /* comment */ v)
+    /// ```
     ///
-    /// // good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// String(1);
     /// Number(1);
     /// array.some(Boolean);
     /// ```
     PreferNativeCoercionFunctions,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for PreferNativeCoercionFunctions {
@@ -63,10 +67,7 @@ impl Rule for PreferNativeCoercionFunctions {
                 if let Some(call_expr_ident) =
                     check_function(&arrow_expr.params, &arrow_expr.body, true)
                 {
-                    ctx.diagnostic(PreferNativeCoercionFunctionsDiagnostic::Function(
-                        arrow_expr.span,
-                        call_expr_ident,
-                    ));
+                    ctx.diagnostic(function(arrow_expr.span, call_expr_ident));
                 }
 
                 if check_array_callback_methods(
@@ -76,9 +77,7 @@ impl Rule for PreferNativeCoercionFunctions {
                     true,
                     ctx,
                 ) {
-                    ctx.diagnostic(PreferNativeCoercionFunctionsDiagnostic::ArrayCallback(
-                        arrow_expr.span,
-                    ));
+                    ctx.diagnostic(array_callback(arrow_expr.span));
                 }
             }
             AstKind::Function(func) => {
@@ -94,25 +93,13 @@ impl Rule for PreferNativeCoercionFunctions {
                     if let Some(call_expr_ident) =
                         check_function(&func.params, function_body, false)
                     {
-                        ctx.diagnostic(PreferNativeCoercionFunctionsDiagnostic::Function(
-                            func.span,
-                            call_expr_ident,
-                        ));
+                        ctx.diagnostic(function(func.span, call_expr_ident));
                     }
                 }
             }
             _ => {}
         }
     }
-}
-
-fn get_first_parameter_name<'a>(arg: &'a FormalParameters) -> Option<&'a str> {
-    let first_func_param = arg.items.first()?;
-    let BindingPatternKind::BindingIdentifier(first_func_param) = &first_func_param.pattern.kind
-    else {
-        return None;
-    };
-    Some(first_func_param.name.as_str())
 }
 
 fn check_function(
@@ -144,14 +131,14 @@ fn check_function(
     None
 }
 
-fn get_returned_ident<'a>(stmt: &'a Statement, is_arrow: bool) -> Option<&'a Atom<'a>> {
+fn get_returned_ident<'a>(stmt: &'a Statement, is_arrow: bool) -> Option<&'a str> {
     if is_arrow {
         if let Statement::ExpressionStatement(expr_stmt) = &stmt {
             return expr_stmt
                 .expression
-                .without_parenthesized()
+                .without_parentheses()
                 .get_identifier_reference()
-                .map(|v| &v.name);
+                .map(|v| v.name.as_str());
         }
     }
 
@@ -163,7 +150,10 @@ fn get_returned_ident<'a>(stmt: &'a Statement, is_arrow: bool) -> Option<&'a Ato
     }
     if let Statement::ReturnStatement(return_statement) = &stmt {
         if let Some(return_expr) = &return_statement.argument {
-            return return_expr.without_parenthesized().get_identifier_reference().map(|v| &v.name);
+            return return_expr
+                .without_parentheses()
+                .get_identifier_reference()
+                .map(|v| v.name.as_str());
         }
     }
 
@@ -174,13 +164,17 @@ fn is_matching_native_coercion_function_call(
     expr: &Expression,
     first_arg_name: &str,
 ) -> Option<&'static str> {
-    let Expression::CallExpression(call_expr) = expr else { return None };
+    let Expression::CallExpression(call_expr) = expr else {
+        return None;
+    };
 
     if call_expr.optional || call_expr.arguments.len() == 0 {
         return None;
     }
 
-    let Expression::Identifier(callee_ident) = &call_expr.callee else { return None };
+    let Expression::Identifier(callee_ident) = &call_expr.callee else {
+        return None;
+    };
 
     let fn_name = NATIVE_COERCION_FUNCTION_NAMES.get_key(callee_ident.name.as_str())?;
 
@@ -195,16 +189,24 @@ fn is_matching_native_coercion_function_call(
 }
 
 fn check_array_callback_methods(
-    node_id: AstNodeId,
+    node_id: NodeId,
     arg: &FormalParameters,
     function_body: &FunctionBody,
     is_arrow: bool,
     ctx: &LintContext,
 ) -> bool {
-    let Some(parent) = ctx.nodes().parent_node(node_id) else { return false };
-    let AstKind::Argument(parent_call_expr_arg) = parent.kind() else { return false };
-    let Some(grand_parent) = ctx.nodes().parent_node(parent.id()) else { return false };
-    let AstKind::CallExpression(call_expr) = grand_parent.kind() else { return false };
+    let Some(parent) = ctx.nodes().parent_node(node_id) else {
+        return false;
+    };
+    let AstKind::Argument(parent_call_expr_arg) = parent.kind() else {
+        return false;
+    };
+    let Some(grand_parent) = ctx.nodes().parent_node(parent.id()) else {
+        return false;
+    };
+    let AstKind::CallExpression(call_expr) = grand_parent.kind() else {
+        return false;
+    };
 
     if !std::ptr::eq(&call_expr.arguments[0], parent_call_expr_arg) {
         return false;
@@ -219,20 +221,26 @@ fn check_array_callback_methods(
     if callee_member_expr.optional() {
         return false;
     }
-    let Some(method_name) = callee_member_expr.static_property_name() else { return false };
+    let Some(method_name) = callee_member_expr.static_property_name() else {
+        return false;
+    };
     if !ARRAY_METHODS_WITH_BOOLEAN_CALLBACK.contains(method_name) {
         return false;
     }
 
-    let Some(first_param_name) = get_first_parameter_name(arg) else { return false };
+    let Some(first_param_name) = get_first_parameter_name(arg) else {
+        return false;
+    };
 
-    let Some(first_stmt) = function_body.statements.first() else { return false };
+    let Some(first_stmt) = function_body.statements.first() else {
+        return false;
+    };
 
     let Some(returned_ident) = get_returned_ident(first_stmt, is_arrow) else {
         return false;
     };
 
-    first_param_name == returned_ident.as_str()
+    first_param_name == returned_ident
 }
 
 const NATIVE_COERCION_FUNCTION_NAMES: phf::Set<&'static str> = phf::phf_set! {
@@ -309,5 +317,11 @@ fn test() {
         r"array.some((v, ) => /* comment */ v)",
     ];
 
-    Tester::new(PreferNativeCoercionFunctions::NAME, pass, fail).test_and_snapshot();
+    Tester::new(
+        PreferNativeCoercionFunctions::NAME,
+        PreferNativeCoercionFunctions::PLUGIN,
+        pass,
+        fail,
+    )
+    .test_and_snapshot();
 }

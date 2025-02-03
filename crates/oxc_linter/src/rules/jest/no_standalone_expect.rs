@@ -1,13 +1,9 @@
-use std::collections::HashMap;
-
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::AstNodeId;
-use oxc_span::Span;
+use oxc_semantic::NodeId;
+use oxc_span::{CompactStr, Span};
+use rustc_hash::FxHashMap;
 
 use crate::{
     context::LintContext,
@@ -20,18 +16,19 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(no-standalone-expect): Expect must be inside of a test block.")]
-#[diagnostic(severity(warning), help("Did you forget to wrap `expect` in a `test` or `it` block?"))]
-struct NoStandaloneExpectDiagnostic(#[label] pub Span);
+fn no_standalone_expect_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Expect must be inside of a test block.")
+        .with_help("Did you forget to wrap `expect` in a `test` or `it` block?")
+        .with_label(span)
+}
 
-/// <https://github.com/jest-community/eslint-plugin-jest/blob/main/docs/rules/no-standalone-expect.md>
+/// <https://github.com/jest-community/eslint-plugin-jest/blob/v28.9.0/docs/rules/no-standalone-expect.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoStandaloneExpect(Box<NoStandaloneExpectConfig>);
 
 #[derive(Debug, Default, Clone)]
 pub struct NoStandaloneExpectConfig {
-    additional_test_block_functions: Vec<String>,
+    additional_test_block_functions: Vec<CompactStr>,
 }
 
 impl std::ops::Deref for NoStandaloneExpect {
@@ -59,6 +56,7 @@ declare_oxc_lint!(
     /// });
     /// ```
     NoStandaloneExpect,
+    jest,
     correctness
 );
 
@@ -68,19 +66,19 @@ impl Rule for NoStandaloneExpect {
             .get(0)
             .and_then(|v| v.get("additionalTestBlockFunctions"))
             .and_then(serde_json::Value::as_array)
-            .map(|v| {
-                v.iter().filter_map(serde_json::Value::as_str).map(ToString::to_string).collect()
-            })
+            .map(|v| v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect())
             .unwrap_or_default();
 
         Self(Box::new(NoStandaloneExpectConfig { additional_test_block_functions }))
     }
+
     fn run_once(&self, ctx: &LintContext<'_>) {
         let possible_jest_nodes = collect_possible_jest_call_node(ctx);
-        let id_nodes_mapping = possible_jest_nodes.iter().fold(HashMap::new(), |mut acc, cur| {
-            acc.entry(cur.node.id()).or_insert(cur);
-            acc
-        });
+        let id_nodes_mapping =
+            possible_jest_nodes.iter().fold(FxHashMap::default(), |mut acc, cur| {
+                acc.entry(cur.node.id()).or_insert(cur);
+                acc
+            });
 
         for possible_jest_node in &possible_jest_nodes {
             self.run(possible_jest_node, &id_nodes_mapping, ctx);
@@ -92,7 +90,7 @@ impl NoStandaloneExpect {
     fn run<'a>(
         &self,
         possible_jest_node: &PossibleJestNode<'a, '_>,
-        id_nodes_mapping: &HashMap<AstNodeId, &PossibleJestNode<'a, '_>>,
+        id_nodes_mapping: &FxHashMap<NodeId, &PossibleJestNode<'a, '_>>,
         ctx: &LintContext<'a>,
     ) {
         let node = possible_jest_node.node;
@@ -122,15 +120,15 @@ impl NoStandaloneExpect {
         )
         .is_none()
         {
-            ctx.diagnostic(NoStandaloneExpectDiagnostic(head.span));
+            ctx.diagnostic(no_standalone_expect_diagnostic(head.span));
         }
     }
 }
 
 fn is_correct_place_to_call_expect<'a>(
     node: &AstNode<'a>,
-    additional_test_block_functions: &[String],
-    id_nodes_mapping: &HashMap<AstNodeId, &PossibleJestNode<'a, '_>>,
+    additional_test_block_functions: &[CompactStr],
+    id_nodes_mapping: &FxHashMap<NodeId, &PossibleJestNode<'a, '_>>,
     ctx: &LintContext<'a>,
 ) -> Option<()> {
     let mut parent = ctx.nodes().parent_node(node.id())?;
@@ -197,8 +195,8 @@ fn is_correct_place_to_call_expect<'a>(
 
 fn is_var_declarator_or_test_block<'a>(
     node: &AstNode<'a>,
-    additional_test_block_functions: &[String],
-    id_nodes_mapping: &HashMap<AstNodeId, &PossibleJestNode<'a, '_>>,
+    additional_test_block_functions: &[CompactStr],
+    id_nodes_mapping: &FxHashMap<NodeId, &PossibleJestNode<'a, '_>>,
     ctx: &LintContext<'a>,
 ) -> bool {
     match node.kind() {
@@ -214,7 +212,7 @@ fn is_var_declarator_or_test_block<'a>(
             }
 
             let node_name = get_node_name(&call_expr.callee);
-            if additional_test_block_functions.iter().any(|fn_name| &node_name == fn_name) {
+            if additional_test_block_functions.iter().any(|fn_name| node_name == fn_name) {
                 return true;
             }
         }
@@ -242,7 +240,10 @@ fn test() {
         ("expect.any(String)", None),
         ("expect.extend({})", None),
         ("describe('a test', () => { it('an it', () => {expect(1).toBe(1); }); });", None),
-        ("describe('a test', () => { it('an it', () => { const func = () => { expect(1).toBe(1); }; }); });", None),
+        (
+            "describe('a test', () => { it('an it', () => { const func = () => { expect(1).toBe(1); }; }); });",
+            None,
+        ),
         ("describe('a test', () => { const func = () => { expect(1).toBe(1); }; });", None),
         ("describe('a test', () => { function func() { expect(1).toBe(1); }; });", None),
         ("describe('a test', () => { const func = function(){ expect(1).toBe(1); }; });", None),
@@ -251,7 +252,10 @@ fn test() {
         ("const func = () => expect(1).toBe(1);", None),
         ("{}", None),
         ("it.each([1, true])('trues', value => { expect(value).toBe(true); });", None),
-        ("it.each([1, true])('trues', value => { expect(value).toBe(true); }); it('an it', () => { expect(1).toBe(1) });", None),
+        (
+            "it.each([1, true])('trues', value => { expect(value).toBe(true); }); it('an it', () => { expect(1).toBe(1) });",
+            None,
+        ),
         (
             "
                 it.each`
@@ -261,17 +265,23 @@ fn test() {
                     expect(value).toBe(true);
                 });
             ",
-            None
+            None,
         ),
         ("it.only('an only', value => { expect(value).toBe(true); });", None),
         ("it.concurrent('an concurrent', value => { expect(value).toBe(true); });", None),
-        ("describe.each([1, true])('trues', value => { it('an it', () => expect(value).toBe(true) ); });", None),
-        ("
+        (
+            "describe.each([1, true])('trues', value => { it('an it', () => expect(value).toBe(true) ); });",
+            None,
+        ),
+        (
+            "
             describe('scenario', () => {
                 const t = Math.random() ? it.only : it;
                 t('testing', () => expect(true));
             });
-        ", Some(serde_json::json!([{ "additionalTestBlockFunctions": ['t'] }]))),
+        ",
+            Some(serde_json::json!([{ "additionalTestBlockFunctions": ['t'] }])),
+        ),
         (
             r"
                 each([
@@ -281,8 +291,10 @@ fn test() {
                 ]).test('returns the result of adding %d to %d', (a, b, expected) => {
                     expect(a + b).toBe(expected);
                 });
-            ", Some(serde_json::json!([{ "additionalTestBlockFunctions": ["each.test"] }])))
-        ];
+            ",
+            Some(serde_json::json!([{ "additionalTestBlockFunctions": ["each.test"] }])),
+        ),
+    ];
 
     let fail = vec![
         ("(() => {})('testing', () => expect(true).toBe(false))", None),
@@ -295,7 +307,7 @@ fn test() {
                     t('testing', () => expect(true).toBe(false));
                 });
             ",
-            None
+            None,
         ),
         (
             "
@@ -304,29 +316,7 @@ fn test() {
                     t('testing', () => expect(true).toBe(false));
                 });
             ",
-            None
-        ),
-        (
-            "
-                each([
-                    [1, 1, 2],
-                    [1, 2, 3],
-                    [2, 1, 3],
-                ]).test('returns the result of adding %d to %d', (a, b, expected) => {
-                    expect(a + b).toBe(expected);
-                });
-            ", None),
-        (
-            "
-                each([
-                    [1, 1, 2],
-                    [1, 2, 3],
-                    [2, 1, 3],
-                ]).test('returns the result of adding %d to %d', (a, b, expected) => {
-                    expect(a + b).toBe(expected);
-                });
-            ",
-            Some(serde_json::json!([{ "additionalTestBlockFunctions": ["each"] }]))
+            None,
         ),
         (
             "
@@ -338,31 +328,66 @@ fn test() {
                     expect(a + b).toBe(expected);
                 });
             ",
-            Some(serde_json::json!([{ "additionalTestBlockFunctions": ["test"] }]))
+            None,
+        ),
+        (
+            "
+                each([
+                    [1, 1, 2],
+                    [1, 2, 3],
+                    [2, 1, 3],
+                ]).test('returns the result of adding %d to %d', (a, b, expected) => {
+                    expect(a + b).toBe(expected);
+                });
+            ",
+            Some(serde_json::json!([{ "additionalTestBlockFunctions": ["each"] }])),
+        ),
+        (
+            "
+                each([
+                    [1, 1, 2],
+                    [1, 2, 3],
+                    [2, 1, 3],
+                ]).test('returns the result of adding %d to %d', (a, b, expected) => {
+                    expect(a + b).toBe(expected);
+                });
+            ",
+            Some(serde_json::json!([{ "additionalTestBlockFunctions": ["test"] }])),
         ),
         ("describe('a test', () => { expect(1).toBe(1); });", None),
         ("describe('a test', () => expect(1).toBe(1));", None),
-        ("describe('a test', () => { const func = () => { expect(1).toBe(1); }; expect(1).toBe(1); });", None),
-        ("describe('a test', () => {  it(() => { expect(1).toBe(1); }); expect(1).toBe(1); });", None),
+        (
+            "describe('a test', () => { const func = () => { expect(1).toBe(1); }; expect(1).toBe(1); });",
+            None,
+        ),
+        (
+            "describe('a test', () => {  it(() => { expect(1).toBe(1); }); expect(1).toBe(1); });",
+            None,
+        ),
         ("expect(1).toBe(1);", None),
         ("{expect(1).toBe(1)}", None),
-        ("it.each([1, true])('trues', value => { expect(value).toBe(true); }); expect(1).toBe(1);", None),
+        (
+            "it.each([1, true])('trues', value => { expect(value).toBe(true); }); expect(1).toBe(1);",
+            None,
+        ),
         ("describe.each([1, true])('trues', value => { expect(value).toBe(true); });", None),
         (
             "
                 import { expect as pleaseExpect } from '@jest/globals';
                 describe('a test', () => { pleaseExpect(1).toBe(1); });
             ",
-            None
+            None,
         ),
         (
             "
                 import { expect as pleaseExpect } from '@jest/globals';
                 beforeEach(() => pleaseExpect.hasAssertions());
             ",
-            None
-        )
+            None,
+        ),
     ];
 
-    Tester::new(NoStandaloneExpect::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    Tester::new(NoStandaloneExpect::NAME, NoStandaloneExpect::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

@@ -1,19 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode, Fix};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(prefer-dom-node-text-content): Prefer `.textContent` over `.innerText`."
-)]
-#[diagnostic(severity(warning), help("Replace `.innerText` with `.textContent`."))]
-struct PreferDomNodeTextContentDiagnostic(#[label] pub Span);
+fn prefer_dom_node_text_content_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer `.textContent` over `.innerText`.")
+        .with_help("Replace `.innerText` with `.textContent`.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferDomNodeTextContent;
@@ -31,60 +27,84 @@ declare_oxc_lint!(
     /// - `.innerText` is not standard, for example, it is not present in Firefox.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// const text = foo.innerText;
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// const text = foo.innerText;
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const text = foo.textContent;
     /// ```
     PreferDomNodeTextContent,
-    style
+    unicorn,
+    style,
+    conditional_fix
 );
 
 impl Rule for PreferDomNodeTextContent {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        if let AstKind::MemberExpression(member_expr) = node.kind() {
-            if let Some((span, name)) = member_expr.static_property_info() {
-                if name == "innerText" && !member_expr.is_computed() {
-                    ctx.diagnostic_with_fix(PreferDomNodeTextContentDiagnostic(span), || {
-                        Fix::new("textContent", span)
-                    });
+        match node.kind() {
+            AstKind::MemberExpression(member_expr) => {
+                if let Some((span, name)) = member_expr.static_property_info() {
+                    if name == "innerText" && !member_expr.is_computed() {
+                        ctx.diagnostic_with_fix(
+                            prefer_dom_node_text_content_diagnostic(span),
+                            |fixer| fixer.replace(span, "textContent"),
+                        );
+                    }
                 }
             }
-        }
+            // `const {innerText} = node` or `({innerText: text} = node)`
+            AstKind::IdentifierName(identifier) => {
+                if identifier.name != "innerText" {
+                    return;
+                }
 
-        let Some(parent_node) = ctx.nodes().parent_node(node.id()) else {
-            return;
-        };
+                let mut ancestor_kinds = ctx.nodes().ancestor_kinds(node.id()).skip(1);
+                let (Some(parent_node_kind), Some(grand_parent_node_kind)) =
+                    (ancestor_kinds.next(), ancestor_kinds.next())
+                else {
+                    return;
+                };
 
-        let Some(grand_parent_node) = ctx.nodes().parent_node(parent_node.id()) else {
-            return;
-        };
-
-        let parent_node_kind = parent_node.kind();
-        let grand_parent_node_kind = grand_parent_node.kind();
-
-        // `const {innerText} = node` or `({innerText: text} = node)`
-        if let AstKind::IdentifierName(identifier) = node.kind() {
-            if identifier.name == "innerText"
-                && matches!(parent_node_kind, AstKind::PropertyKey(_))
-                && (matches!(grand_parent_node_kind, AstKind::ObjectPattern(_))
-                    || matches!(grand_parent_node_kind, AstKind::AssignmentTarget(_)))
-            {
-                ctx.diagnostic(PreferDomNodeTextContentDiagnostic(identifier.span));
-                return;
+                if matches!(parent_node_kind, AstKind::PropertyKey(_))
+                    && (matches!(grand_parent_node_kind, AstKind::ObjectPattern(_))
+                        || matches!(
+                            grand_parent_node_kind,
+                            AstKind::ObjectAssignmentTarget(_)
+                                | AstKind::SimpleAssignmentTarget(_)
+                                | AstKind::AssignmentTarget(_)
+                        ))
+                {
+                    ctx.diagnostic(prefer_dom_node_text_content_diagnostic(identifier.span));
+                }
             }
-        }
+            // `({innerText} = node)`
+            AstKind::IdentifierReference(identifier_ref) => {
+                if identifier_ref.name != "innerText" {
+                    return;
+                }
 
-        // `({innerText} = node)`
-        if let AstKind::IdentifierReference(identifier_ref) = node.kind() {
-            if identifier_ref.name == "innerText"
-                && matches!(parent_node_kind, AstKind::AssignmentTarget(_))
-                && matches!(grand_parent_node_kind, AstKind::AssignmentExpression(_))
-            {
-                ctx.diagnostic(PreferDomNodeTextContentDiagnostic(identifier_ref.span));
+                let mut ancestor_kinds = ctx.nodes().ancestor_kinds(node.id()).skip(1);
+                let (Some(parent_node_kind), Some(grand_parent_node_kind)) =
+                    (ancestor_kinds.next(), ancestor_kinds.next())
+                else {
+                    return;
+                };
+
+                if matches!(
+                    parent_node_kind,
+                    AstKind::ObjectAssignmentTarget(_)
+                        | AstKind::AssignmentTarget(_)
+                        | AstKind::SimpleAssignmentTarget(_)
+                ) && matches!(grand_parent_node_kind, AstKind::AssignmentTargetPattern(_))
+                {
+                    ctx.diagnostic(prefer_dom_node_text_content_diagnostic(identifier_ref.span));
+                }
             }
+            _ => {}
         }
     }
 }
@@ -126,5 +146,15 @@ fn test() {
         ("for (const [{innerText}] of elements);", None),
     ];
 
-    Tester::new(PreferDomNodeTextContent::NAME, pass, fail).test_and_snapshot();
+    // TODO: implement a fixer for destructuring assignment cases
+    let fix = vec![
+        ("node.innerText;", "node.textContent;"),
+        ("node?.innerText;", "node?.textContent;"),
+        ("node.innerText = 'foo';", "node.textContent = 'foo';"),
+        ("innerText.innerText = 'foo';", "innerText.textContent = 'foo';"),
+    ];
+
+    Tester::new(PreferDomNodeTextContent::NAME, PreferDomNodeTextContent::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

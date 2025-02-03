@@ -2,20 +2,22 @@ use oxc_ast::{
     ast::{BindingPatternKind, Declaration, ModuleDeclaration},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use phf::phf_set;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-typos): {0} may be a typo. Did you mean {1}?")]
-#[diagnostic(severity(warning), help("Prevent common typos in Next.js's data fetching functions"))]
-struct NoTyposDiagnostic(String, String, #[label] pub Span);
+fn no_typos_diagnostic(typo: &str, suggestion: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{typo} may be a typo. Did you mean {suggestion}?"))
+        .with_help("Prevent common typos in Next.js's data fetching functions")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoTypos;
@@ -35,7 +37,9 @@ declare_oxc_lint!(
     /// export async function getServurSideProps(){};
     /// ```
     NoTypos,
-    correctness
+    nextjs,
+    correctness,
+    pending
 );
 
 const NEXTJS_DATA_FETCHING_FUNCTIONS: phf::Set<&'static str> = phf_set! {
@@ -48,16 +52,24 @@ const NEXTJS_DATA_FETCHING_FUNCTIONS: phf::Set<&'static str> = phf_set! {
 const THRESHOLD: i32 = 1;
 
 impl Rule for NoTypos {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let Some(path) = ctx.file_path().to_str() else { return };
-        let Some(path_after_pages) = path.split("pages").nth(1) else { return };
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        let Some(path) = ctx.file_path().to_str() else {
+            return false;
+        };
+        let Some(path_after_pages) = path.split("pages").nth(1) else {
+            return false;
+        };
         if path_after_pages.starts_with("/api") {
-            return;
+            return false;
         }
+        true
+    }
+
+    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::ModuleDeclaration(ModuleDeclaration::ExportNamedDeclaration(en_decl)) =
             node.kind()
         {
-            if let Some(ref decl) = en_decl.declaration {
+            if let Some(decl) = &en_decl.declaration {
                 match decl {
                     Declaration::VariableDeclaration(decl) => {
                         for decl in &decl.declarations {
@@ -67,19 +79,21 @@ impl Rule for NoTypos {
                             let Some(potential_typo) = get_potential_typo(&id.name) else {
                                 continue;
                             };
-                            ctx.diagnostic(NoTyposDiagnostic(
-                                id.name.to_string(),
-                                potential_typo.to_string(),
+                            ctx.diagnostic(no_typos_diagnostic(
+                                id.name.as_str(),
+                                potential_typo,
                                 id.span,
                             ));
                         }
                     }
                     Declaration::FunctionDeclaration(decl) => {
                         let Some(id) = &decl.id else { return };
-                        let Some(potential_typo) = get_potential_typo(&id.name) else { return };
-                        ctx.diagnostic(NoTyposDiagnostic(
-                            id.name.to_string(),
-                            potential_typo.to_string(),
+                        let Some(potential_typo) = get_potential_typo(&id.name) else {
+                            return;
+                        };
+                        ctx.diagnostic(no_typos_diagnostic(
+                            id.name.as_str(),
+                            potential_typo,
                             id.span,
                         ));
                     }
@@ -120,9 +134,9 @@ fn min_distance(a: &str, b: &str) -> usize {
 
     let mut previous_row: Vec<usize> = (0..=n).collect();
 
-    for (i, s1) in a.chars().enumerate() {
+    for (i, s1) in a.char_indices() {
         let mut current_row = vec![i + 1];
-        for (j, s2) in b.chars().enumerate() {
+        for (j, s2) in b.char_indices() {
             let insertions = previous_row[j + 1] + 1;
             let deletions = current_row[j] + 1;
             let substitutions = previous_row[j] + usize::from(s1 != s2);
@@ -135,8 +149,9 @@ fn min_distance(a: &str, b: &str) -> usize {
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use std::path::PathBuf;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         (
@@ -284,5 +299,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoTypos::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoTypos::NAME, NoTypos::PLUGIN, pass, fail).test_and_snapshot();
 }

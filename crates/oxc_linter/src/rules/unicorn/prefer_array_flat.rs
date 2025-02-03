@@ -4,10 +4,7 @@ use oxc_ast::{
     },
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -15,15 +12,18 @@ use crate::{
     ast_util::is_method_call,
     context::LintContext,
     rule::Rule,
-    utils::get_first_parameter_name,
-    utils::{get_return_identifier_name, is_empty_array_expression, is_prototype_property},
+    utils::{
+        get_first_parameter_name, get_return_identifier_name, is_empty_array_expression,
+        is_prototype_property,
+    },
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-array-flat): Prefer Array#flat() over legacy techniques to flatten arrays.")]
-#[diagnostic(severity(warning), help(r"Call `.flat()` on the array instead."))]
-struct PreferArrayFlatDiagnostic(#[label] pub Span);
+fn prefer_array_flat_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer Array#flat() over legacy techniques to flatten arrays.")
+        .with_help(r"Call `.flat()` on the array instead.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferArrayFlat;
@@ -31,7 +31,7 @@ pub struct PreferArrayFlat;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Prefers `Array#flat()` over legacy techniques to flatten arrays.    ///
+    /// Prefers `Array#flat()` over legacy techniques to flatten arrays.
     ///
     /// ### Why is this bad?
     ///
@@ -40,8 +40,9 @@ declare_oxc_lint!(
     /// This rule aims to standardize the use of `Array#flat()` over legacy techniques to flatten arrays.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// const foo = array.flatMap(x => x);
     /// const foo = array.reduce((a, b) => a.concat(b), []);
     /// const foo = array.reduce((a, b) => [...a, ...b], []);
@@ -51,13 +52,17 @@ declare_oxc_lint!(
     /// const foo = Array.prototype.concat.apply([], array);
     /// const foo = Array.prototype.concat.call([], maybeArray);
     /// const foo = Array.prototype.concat.call([], ...array);
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const foo = array.flat();
     /// const foo = [maybeArray].flat();
     /// ```
     PreferArrayFlat,
-    pedantic
+    unicorn,
+    pedantic,
+    conditional_fix
 );
 
 impl Rule for PreferArrayFlat {
@@ -99,7 +104,19 @@ fn check_array_flat_map_case<'a>(call_expr: &CallExpression<'a>, ctx: &LintConte
         return;
     }
 
-    ctx.diagnostic(PreferArrayFlatDiagnostic(call_expr.span));
+    let target_fix_span = call_expr
+        .callee
+        .as_member_expression()
+        .and_then(oxc_ast::ast::MemberExpression::static_property_info)
+        .map(|v| Span::new(v.0.start, call_expr.span.end));
+
+    if let Some(span) = target_fix_span {
+        ctx.diagnostic_with_fix(prefer_array_flat_diagnostic(call_expr.span), |fixer| {
+            fixer.replace(span, "flat()")
+        });
+    } else {
+        ctx.diagnostic(prefer_array_flat_diagnostic(call_expr.span));
+    }
 }
 
 // `array.reduce((a, b) => a.concat(b), [])`
@@ -128,7 +145,7 @@ fn check_array_reduce_case<'a>(call_expr: &CallExpression<'a>, ctx: &LintContext
             &first_argument.params.items[1].pattern.kind,
         ) {
             (
-                BindingPatternKind::BindingIdentifier(ref first_param),
+                BindingPatternKind::BindingIdentifier(first_param),
                 BindingPatternKind::BindingIdentifier(second_param),
             ) => Some((&first_param.name, &second_param.name)),
 
@@ -161,11 +178,26 @@ fn check_array_reduce_case<'a>(call_expr: &CallExpression<'a>, ctx: &LintContext
                     return;
                 }
 
-                ctx.diagnostic(PreferArrayFlatDiagnostic(call_expr.span));
+                ctx.diagnostic_with_fix(prefer_array_flat_diagnostic(call_expr.span), |fixer| {
+                    let target_fix_span = call_expr
+                        .callee
+                        .as_member_expression()
+                        .and_then(oxc_ast::ast::MemberExpression::static_property_info)
+                        .map(|v| Span::new(v.0.start, call_expr.span.end));
+
+                    debug_assert!(target_fix_span.is_some());
+
+                    if let Some(span) = target_fix_span {
+                        fixer.replace(span, "flat()")
+                    } else {
+                        fixer.noop()
+                    }
+                });
             }
         }
     }
 
+    // `array.reduce((a, b) => [...a, ...b], [])`
     if let Expression::ArrayExpression(array_expr) = &expr_stmt.expression {
         if array_expr.elements.len() != 2 {
             return;
@@ -193,7 +225,21 @@ fn check_array_reduce_case<'a>(call_expr: &CallExpression<'a>, ctx: &LintContext
             return;
         }
 
-        ctx.diagnostic(PreferArrayFlatDiagnostic(call_expr.span));
+        ctx.diagnostic_with_fix(prefer_array_flat_diagnostic(call_expr.span), |fixer| {
+            let target_fix_span = call_expr
+                .callee
+                .as_member_expression()
+                .and_then(oxc_ast::ast::MemberExpression::static_property_info)
+                .map(|v| Span::new(v.0.start, call_expr.span.end));
+
+            debug_assert!(target_fix_span.is_some());
+
+            if let Some(target_fix_span) = target_fix_span {
+                fixer.replace(target_fix_span, "flat()")
+            } else {
+                fixer.noop()
+            }
+        });
     };
 }
 
@@ -208,7 +254,7 @@ fn check_array_concat_case<'a>(call_expr: &CallExpression<'a>, ctx: &LintContext
             if !array_expr.elements.is_empty() {
                 return;
             }
-            ctx.diagnostic(PreferArrayFlatDiagnostic(call_expr.span));
+            ctx.diagnostic(prefer_array_flat_diagnostic(call_expr.span));
         }
     }
 }
@@ -232,7 +278,7 @@ fn check_array_prototype_concat_case<'a>(call_expr: &CallExpression<'a>, ctx: &L
                     && (is_call_call
                         || !matches!(call_expr.arguments.get(1), Some(Argument::SpreadElement(_))))
                 {
-                    ctx.diagnostic(PreferArrayFlatDiagnostic(call_expr.span));
+                    ctx.diagnostic(prefer_array_flat_diagnostic(call_expr.span));
                 }
             }
         }
@@ -257,6 +303,7 @@ fn test() {
         r"array.flatMap(() => x)",
         r"array.flatMap((x, y) => x)",
         r"array.flatMap(x => y)",
+        r"(array?.flatMap)?.(x => y)",
         r"new array.reduce((a, b) => a.concat(b), [])",
         r"array.reduce",
         r"reduce((a, b) => a.concat(b), [])",
@@ -343,6 +390,7 @@ fn test() {
 
     let fail = vec![
         r"array.flatMap(x => x)",
+        r"(array?.flatMap)?.(x => x)",
         r"function foo(){return[].flatMap(x => x)}",
         r"foo.flatMap(x => x) instanceof Array",
         r"array.reduce((a, b) => a.concat(b), [])",
@@ -404,5 +452,13 @@ fn test() {
         r"[/**/].concat(some.array)",
     ];
 
-    Tester::new(PreferArrayFlat::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("array.flatMap(x => x)", "array.flat()"),
+        ("array.reduce((a, b) => a.concat(b), [])", "array.flat()"),
+        ("array.reduce((a, b) => [...a, ...b], [])", "array.flat()"),
+    ];
+
+    Tester::new(PreferArrayFlat::NAME, PreferArrayFlat::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

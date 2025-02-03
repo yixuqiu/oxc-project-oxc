@@ -1,8 +1,7 @@
+use std::borrow::Cow;
+
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
@@ -10,15 +9,18 @@ use crate::{
     ast_util::{call_expr_method_callee_info, is_method_call},
     context::LintContext,
     rule::Rule,
-    AstNode, Fix,
+    AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(no-console-spaces): Do not use {0} spaces with `console.{1}` parameters"
-)]
-#[diagnostic(severity(warning), help("The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added."))]
-struct NoConsoleSpacesDiagnostic(&'static str, String, #[label] pub Span);
+fn no_console_spaces_diagnostic(
+    leading_or_trailing: &str,
+    method_name: &str,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Do not use {leading_or_trailing} spaces with `console.{method_name}` parameters"))
+        .with_help("The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoConsoleSpaces;
@@ -33,22 +35,27 @@ declare_oxc_lint!(
     /// The `console.log()` method and similar methods join the parameters with a space so adding a leading/trailing space to a parameter, results in two spaces being added.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    ///
-    /// // Bad
     /// console.log("abc ", "def");
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// console.log("abc", "def");
-    ///
     /// ```
     NoConsoleSpaces,
-    style
+    unicorn,
+    style,
+    fix
 );
 
 impl Rule for NoConsoleSpaces {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
         if !is_method_call(
             call_expr,
@@ -117,25 +124,23 @@ fn check_literal_leading(i: usize, literal: &str) -> bool {
 fn check_literal_trailing(i: usize, literal: &str, call_expr_arg_len: usize) -> bool {
     i != call_expr_arg_len - 1 && literal.ends_with(' ')
 }
-fn report_diagnostic(
+fn report_diagnostic<'a>(
     direction: &'static str,
-    ident: &str,
+    ident: &'a str,
     span: Span,
-    literal_raw: &str,
+    literal_raw: &'a str,
     is_template_lit: bool,
-    ctx: &LintContext,
+    ctx: &LintContext<'a>,
 ) {
-    let (start, end) =
-        if is_template_lit { (span.start, span.end) } else { (span.start + 1, span.end - 1) };
+    let span = if is_template_lit { span } else { Span::new(span.start + 1, span.end - 1) };
 
-    let fix = if is_template_lit {
-        format!("`{}`", literal_raw.trim())
-    } else {
-        literal_raw.trim().to_string()
-    };
-
-    ctx.diagnostic_with_fix(NoConsoleSpacesDiagnostic(direction, ident.to_string(), span), || {
-        Fix::new(fix, Span::new(start, end))
+    ctx.diagnostic_with_fix(no_console_spaces_diagnostic(direction, ident, span), |fixer| {
+        let content = if is_template_lit {
+            Cow::Owned(format!("`{}`", literal_raw.trim()))
+        } else {
+            Cow::Borrowed(literal_raw.trim())
+        };
+        fixer.replace(span, content)
     });
 }
 
@@ -248,5 +253,7 @@ fn test() {
         ("console.error(foo, ` bar`)", "console.error(foo, `bar`)", None),
     ];
 
-    Tester::new(NoConsoleSpaces::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoConsoleSpaces::NAME, NoConsoleSpaces::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

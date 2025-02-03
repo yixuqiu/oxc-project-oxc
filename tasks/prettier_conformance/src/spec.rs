@@ -1,68 +1,111 @@
-#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-
 use std::{fs, path::Path, str::FromStr};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    ast::{Argument, ArrayExpressionElement, CallExpression, Expression, ObjectPropertyKind},
+    ast::{
+        Argument, ArrayExpressionElement, CallExpression, Expression, ObjectPropertyKind,
+        VariableDeclarator,
+    },
     VisitMut,
 };
 use oxc_parser::Parser;
 use oxc_prettier::{ArrowParens, EndOfLine, PrettierOptions, QuoteProps, TrailingComma};
 use oxc_span::{GetSpan, SourceType};
 
+/// Vec<(key, value)>
+type SnapshotOptions = Vec<(String, String)>;
+
+pub fn parse_spec(spec: &Path) -> Vec<(PrettierOptions, SnapshotOptions)> {
+    let mut parser = SpecParser::default();
+    parser.parse(spec);
+    parser.calls
+}
+
 #[derive(Default)]
-pub struct SpecParser {
-    pub calls: Vec<(PrettierOptions, Vec<(String, String)>)>,
+struct SpecParser {
     source_text: String,
+    parsers: Vec<String>,
+    calls: Vec<(PrettierOptions, SnapshotOptions)>,
 }
 
 impl SpecParser {
-    pub fn parse(&mut self, spec: &Path) {
+    fn parse(&mut self, spec: &Path) {
         let spec_content = fs::read_to_string(spec).unwrap_or_default();
+
+        self.source_text.clone_from(&spec_content);
+
         let allocator = Allocator::default();
         let source_type = SourceType::from_path(spec).unwrap_or_default();
+
         let mut ret = Parser::new(&allocator, &spec_content, source_type).parse();
-        self.source_text.clone_from(&spec_content);
-        self.calls = vec![];
         self.visit_program(&mut ret.program);
     }
 }
 
 impl VisitMut<'_> for SpecParser {
+    // Some test cases use a variable to store the parsers.
+    //
+    // ```js
+    // const parser = ["babel"];
+    //
+    // runFormatTest(import.meta, parser, {});
+    // runFormatTest(import.meta, parser, { semi: false });
+    // ````
+    fn visit_variable_declarator(&mut self, decl: &mut VariableDeclarator<'_>) {
+        let Some(name) = decl.id.get_identifier_name() else { return };
+        if !matches!(name.as_str(), "parser" | "parsers") {
+            return;
+        }
+
+        debug_assert!(self.parsers.is_empty(), "`parsers` is already defined");
+        if let Some(Expression::ArrayExpression(arr_expr)) = &decl.init {
+            for el in &arr_expr.elements {
+                if let ArrayExpressionElement::StringLiteral(literal) = el {
+                    self.parsers.push(literal.value.to_string());
+                }
+            }
+        }
+    }
+
+    // The `runFormatTest()` function is used on prettier's test cases.
+    // We need to collect all calls and get the options and parsers.
     fn visit_call_expression(&mut self, expr: &mut CallExpression<'_>) {
         let Some(ident) = expr.callee.get_identifier_reference() else { return };
-        // The `runFormatTest` function used on prettier's test cases. We need to collect all `run_spec` calls
-        // And then parse the arguments to get the options and parsers
-        // Finally we use this information to generate the snapshot tests
         if ident.name != "runFormatTest" {
             return;
         }
+
+        let mut snapshot_options: SnapshotOptions = vec![];
         let mut parsers = vec![];
-        let mut snapshot_options: Vec<(String, String)> = vec![];
         let mut options = PrettierOptions::default();
 
+        // Get parsers
         if let Some(argument) = expr.arguments.get(1) {
             let Some(argument_expr) = argument.as_expression() else {
                 return;
             };
 
+            // If inlined array
             if let Expression::ArrayExpression(arr_expr) = argument_expr {
-                parsers = arr_expr
-                    .elements
-                    .iter()
-                    .filter_map(|el| {
-                        if let ArrayExpressionElement::StringLiteral(literal) = el {
-                            return Some(literal.value.to_string());
-                        }
-                        None
-                    })
-                    .collect::<Vec<String>>();
+                for el in &arr_expr.elements {
+                    if let ArrayExpressionElement::StringLiteral(literal) = el {
+                        parsers.push(literal.value.to_string());
+                    }
+                }
+            }
+            // If variable
+            if let Expression::Identifier(_) = argument_expr {
+                debug_assert!(
+                    !self.parsers.is_empty(),
+                    "`parsers` is not collected, check variable name"
+                );
+                parsers.clone_from(&self.parsers);
             }
         } else {
             return;
         }
 
+        // Get options
         if let Some(Argument::ObjectExpression(obj_expr)) = expr.arguments.get(2) {
             obj_expr.properties.iter().for_each(|item| {
                 if let ObjectPropertyKind::ObjectProperty(obj_prop) = item {
@@ -77,12 +120,13 @@ impl VisitMut<'_> for SpecParser {
                                     options.single_quote = literal.value;
                                 }
                             }
-                            Expression::NumericLiteral(literal) => match name.as_str() {
+                            #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                            Expression::NumericLiteral(literal) => match name.as_ref() {
                                 "printWidth" => options.print_width = literal.value as usize,
                                 "tabWidth" => options.tab_width = literal.value as usize,
                                 _ => {}
                             },
-                            Expression::StringLiteral(literal) => match name.as_str() {
+                            Expression::StringLiteral(literal) => match name.as_ref() {
                                 "trailingComma" => {
                                     options.trailing_comma =
                                         TrailingComma::from_str(literal.value.as_str()).unwrap();
@@ -114,6 +158,7 @@ impl VisitMut<'_> for SpecParser {
             });
         }
 
+        debug_assert!(!parsers.is_empty(), "`parsers` should not be empty");
         snapshot_options.push((
             "parsers".to_string(),
             format!(

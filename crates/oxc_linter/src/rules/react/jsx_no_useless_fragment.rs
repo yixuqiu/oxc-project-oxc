@@ -5,24 +5,23 @@ use oxc_ast::{
     },
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::AstNodeId;
+use oxc_semantic::NodeId;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-enum JsxNoUselessFragmentDiagnostic {
-    #[error("eslint-plugin-react(jsx-no-useless-fragment): Fragments should contain more than one child.")]
-    #[diagnostic(severity(warning))]
-    NeedsMoreChildren(#[label] Span),
-    #[error("eslint-plugin-react(jsx-no-useless-fragment): Passing a fragment to a HTML element is useless.")]
-    #[diagnostic(severity(warning))]
-    ChildOfHtmlElement(#[label] Span),
+fn needs_more_children(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Fragments should contain more than one child.").with_label(span)
+}
+
+fn child_of_html_element(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Passing a fragment to a HTML element is useless.").with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -41,17 +40,21 @@ declare_oxc_lint!(
     /// Fragments are a useful tool when you need to group multiple children without adding a node to the DOM tree. However, sometimes you might end up with a fragment with a single child. When this child is an element, string, or expression, it's not necessary to use a fragment.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <>foo</>
     /// <div><>foo</></div>
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <>foo <div></div></>
     /// <div>foo</div>
     /// ```
     JsxNoUselessFragment,
-    correctness
+    react,
+    pedantic
 );
 
 impl Rule for JsxNoUselessFragment {
@@ -61,7 +64,7 @@ impl Rule for JsxNoUselessFragment {
         Self {
             allow_expressions: value
                 .and_then(|val| val.get("allowExpressions").and_then(serde_json::Value::as_bool))
-                .unwrap_or(true),
+                .unwrap_or(Self::default().allow_expressions),
         }
     }
 
@@ -79,6 +82,10 @@ impl Rule for JsxNoUselessFragment {
             _ => {}
         }
     }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
+    }
 }
 
 impl JsxNoUselessFragment {
@@ -92,35 +99,40 @@ impl JsxNoUselessFragment {
             && !(self.allow_expressions && is_fragment_with_single_expression(&elem.children))
         {
             let span = elem.opening_element.span;
-            ctx.diagnostic(JsxNoUselessFragmentDiagnostic::NeedsMoreChildren(span));
+            ctx.diagnostic(needs_more_children(span));
         }
 
         if is_child_of_html_element(node, ctx) {
             let span = elem.opening_element.span;
-            ctx.diagnostic(JsxNoUselessFragmentDiagnostic::ChildOfHtmlElement(span));
+            ctx.diagnostic(child_of_html_element(span));
         }
     }
+
     fn check_fragment(&self, node: &AstNode, elem: &JSXFragment, ctx: &LintContext) {
         if has_less_than_two_children(&elem.children)
             && !is_fragment_with_only_text_and_is_not_child(node.id(), &elem.children, ctx)
             && !(self.allow_expressions && is_fragment_with_single_expression(&elem.children))
         {
             let span = elem.opening_fragment.span;
-            ctx.diagnostic(JsxNoUselessFragmentDiagnostic::NeedsMoreChildren(span));
+            ctx.diagnostic(needs_more_children(span));
         }
 
         if is_child_of_html_element(node, ctx) {
             let span = elem.opening_fragment.span;
-            ctx.diagnostic(JsxNoUselessFragmentDiagnostic::ChildOfHtmlElement(span));
+            ctx.diagnostic(child_of_html_element(span));
         }
     }
 }
 
 fn jsx_elem_has_key_attr(elem: &JSXElement) -> bool {
     elem.opening_element.attributes.iter().any(|attr| {
-        let JSXAttributeItem::Attribute(attr) = attr else { return false };
+        let JSXAttributeItem::Attribute(attr) = attr else {
+            return false;
+        };
 
-        let JSXAttributeName::Identifier(ident) = &attr.name else { return false };
+        let JSXAttributeName::Identifier(ident) = &attr.name else {
+            return false;
+        };
 
         ident.name == "key"
     })
@@ -151,26 +163,26 @@ fn is_child_of_html_element(node: &AstNode, ctx: &LintContext) -> bool {
 }
 
 fn is_html_element(elem_name: &JSXElementName) -> bool {
-    let JSXElementName::Identifier(ident) = elem_name else { return false };
+    let JSXElementName::Identifier(ident) = elem_name else {
+        return false;
+    };
 
     ident.name.starts_with(char::is_lowercase)
 }
 
 fn is_jsx_fragment(elem: &JSXOpeningElement) -> bool {
     match &elem.name {
-        JSXElementName::Identifier(ident) => ident.name.as_str() == "Fragment",
+        JSXElementName::IdentifierReference(ident) => ident.name == "Fragment",
         JSXElementName::MemberExpression(mem_expr) => {
-            if mem_expr.property.name.as_str() != "Fragment" {
-                return false;
+            if let JSXMemberExpressionObject::IdentifierReference(ident) = &mem_expr.object {
+                ident.name == "React" && mem_expr.property.name == "Fragment"
+            } else {
+                false
             }
-
-            let JSXMemberExpressionObject::Identifier(ident) = &mem_expr.object else {
-                return false;
-            };
-
-            return ident.name.as_str() == "React";
         }
-        JSXElementName::NamespacedName(_) => false,
+        JSXElementName::NamespacedName(_)
+        | JSXElementName::Identifier(_)
+        | JSXElementName::ThisExpression(_) => false,
     }
 }
 
@@ -193,7 +205,7 @@ fn has_less_than_two_children(children: &oxc_allocator::Vec<'_, JSXChild<'_>>) -
 }
 
 fn is_fragment_with_only_text_and_is_not_child<'a>(
-    id: AstNodeId,
+    id: NodeId,
     node: &oxc_allocator::Vec<'a, JSXChild<'a>>,
     ctx: &LintContext,
 ) -> bool {
@@ -202,7 +214,9 @@ fn is_fragment_with_only_text_and_is_not_child<'a>(
     }
 
     if let Some(JSXChild::Text(_)) = node.first() {
-        let Some(parent) = ctx.nodes().parent_kind(id) else { return false };
+        let Some(parent) = ctx.nodes().parent_kind(id) else {
+            return false;
+        };
         return !matches!(parent, AstKind::JSXElement(_) | AstKind::JSXFragment(_));
     }
 
@@ -211,8 +225,9 @@ fn is_fragment_with_only_text_and_is_not_child<'a>(
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use serde_json::json;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         (r"<><Foo /><Bar /></>", None),
@@ -236,7 +251,7 @@ fn test() {
         ",
             Some(json!([{ "allowExpressions": true }])),
         ),
-        (r"{1 && <>{1}</>}", Some(json!(["warn", {"allowExpressions": true}]))),
+        (r"{1 && <>{1}</>}", Some(json!([{"allowExpressions": true}]))),
     ];
 
     let fail = vec![
@@ -303,5 +318,6 @@ fn test() {
         (r"<><Foo>{moo}</Foo></>", None),
     ];
 
-    Tester::new(JsxNoUselessFragment::NAME, pass, fail).test_and_snapshot();
+    Tester::new(JsxNoUselessFragment::NAME, JsxNoUselessFragment::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

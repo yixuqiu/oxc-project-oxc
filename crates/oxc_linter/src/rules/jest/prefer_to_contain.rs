@@ -2,10 +2,7 @@ use oxc_ast::{
     ast::{Argument, CallExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -13,15 +10,14 @@ use crate::{
     context::LintContext,
     rule::Rule,
     utils::{
-        collect_possible_jest_call_node, is_equality_matcher, parse_expect_jest_fn_call,
-        KnownMemberExpressionParentKind, PossibleJestNode,
+        is_equality_matcher, parse_expect_jest_fn_call, KnownMemberExpressionParentKind,
+        PossibleJestNode,
     },
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(prefer-to-contain): Suggest using `toContain()`.")]
-#[diagnostic(severity(warning))]
-struct UseToContain(#[label] pub Span);
+fn use_to_contain(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using `toContain()`.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferToContain;
@@ -53,14 +49,17 @@ declare_oxc_lint!(
     /// ```
     ///
     PreferToContain,
+    jest,
     style,
 );
 
 impl Rule for PreferToContain {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -122,7 +121,7 @@ impl PreferToContain {
             return;
         }
 
-        ctx.diagnostic(UseToContain(matcher.span));
+        ctx.diagnostic(use_to_contain(matcher.span));
     }
 
     fn is_fixable_includes_call_expression(call_expr: &CallExpression) -> bool {
@@ -221,5 +220,7 @@ fn tests() {
         ("expect(a.includes(b)).toEqual(false as boolean);", None),
     ];
 
-    Tester::new(PreferToContain::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    Tester::new(PreferToContain::NAME, PreferToContain::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

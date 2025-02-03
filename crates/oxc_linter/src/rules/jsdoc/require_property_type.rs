@@ -1,7 +1,4 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -11,36 +8,43 @@ use crate::{
     utils::{should_ignore_as_internal, should_ignore_as_private},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsdoc(require-property-type): Missing type in @property tag.")]
-#[diagnostic(severity(warning), help("Add a {{type}} to this @property tag."))]
-struct RequirePropertyTypeDiagnostic(#[label] pub Span);
+fn require_property_type_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Missing type in @property tag.")
+        .with_help("Add a {type} to this @property tag.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequirePropertyType;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Requires that each `@property` tag has a type value (within curly brackets).
     ///
     /// ### Why is this bad?
+    ///
     /// The type of a property should be documented.
     ///
-    /// ### Example
-    /// ```javascript
-    /// // Passing
-    /// /**
-    ///  * @typedef {SomeType} SomeTypedef
-    ///  * @property {number} foo
-    ///  */
+    /// ### Examples
     ///
-    /// // Failing
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// /**
     ///  * @typedef {SomeType} SomeTypedef
     ///  * @property foo
     ///  */
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /**
+    ///  * @typedef {SomeType} SomeTypedef
+    ///  * @property {number} foo
+    ///  */
+    /// ```
     RequirePropertyType,
+    jsdoc,
     correctness
 );
 
@@ -67,7 +71,7 @@ impl Rule for RequirePropertyType {
                     continue;
                 };
 
-                ctx.diagnostic(RequirePropertyTypeDiagnostic(tag_name.span));
+                ctx.diagnostic(require_property_type_diagnostic(tag_name.span));
             }
         }
     }
@@ -184,5 +188,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(RequirePropertyType::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequirePropertyType::NAME, RequirePropertyType::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -2,24 +2,23 @@ use oxc_ast::{
     ast::{Argument, CallExpression, Expression, NewExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[diagnostic(severity(warning))]
-pub enum ErrorMessageDiagnostic {
-    #[error("eslint-plugin-unicorn(error-message): Pass a message to the {0:1} constructor.")]
-    MissingMessage(CompactStr, #[label] Span),
-    #[error("eslint-plugin-unicorn(error-message): Error message should not be an empty string.")]
-    EmptyMessage(#[label] Span),
-    #[error("eslint-plugin-unicorn(error-message): Error message should be a string.")]
-    NotString(#[label] Span),
+fn missing_message(ctor_name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Pass a message to the {ctor_name:1} constructor."))
+        .with_label(span)
+}
+
+fn empty_message(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Error message should not be an empty string.").with_label(span)
+}
+
+fn not_string(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Error message should be a string.").with_label(span)
 }
 
 #[derive(Default, Debug, Clone)]
@@ -30,19 +29,23 @@ declare_oxc_lint!(
     ///
     /// This rule enforces a `message` value to be passed in when creating an instance of a built-in `Error` object, which leads to more readable and debuggable code.
     ///
-    /// ### Example
+    /// ### Why is this bad?
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Fail
     /// throw Error()
     /// throw new TypeError()
+    /// ```
     ///
-    /// // Pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// throw new Error('Unexpected token')
     /// throw new TypeError('Number expected')
-    ///
-    ///
     /// ```
     ErrorMessage,
+    unicorn,
     style
 );
 
@@ -83,28 +86,25 @@ impl Rule for ErrorMessage {
         let message_argument = args.get(message_argument_idx);
 
         let Some(arg) = message_argument else {
-            return ctx.diagnostic(ErrorMessageDiagnostic::MissingMessage(
-                constructor_name.to_compact_str(),
-                span,
-            ));
+            return ctx.diagnostic(missing_message(constructor_name.as_str(), span));
         };
 
         match arg {
             Argument::StringLiteral(lit) => {
                 if lit.value.is_empty() {
-                    ctx.diagnostic(ErrorMessageDiagnostic::EmptyMessage(lit.span));
+                    ctx.diagnostic(empty_message(lit.span));
                 }
             }
             Argument::TemplateLiteral(template_lit) => {
                 if template_lit.span.source_text(ctx.source_text()).len() == 2 {
-                    ctx.diagnostic(ErrorMessageDiagnostic::EmptyMessage(template_lit.span));
+                    ctx.diagnostic(empty_message(template_lit.span));
                 }
             }
             Argument::ObjectExpression(object_expr) => {
-                ctx.diagnostic(ErrorMessageDiagnostic::NotString(object_expr.span));
+                ctx.diagnostic(not_string(object_expr.span));
             }
             Argument::ArrayExpression(array_expr) => {
-                ctx.diagnostic(ErrorMessageDiagnostic::NotString(array_expr.span));
+                ctx.diagnostic(not_string(array_expr.span));
             }
             _ => {}
         }
@@ -173,5 +173,5 @@ fn test() {
         ("const error = new AggregateError;", None),
     ];
 
-    Tester::new(ErrorMessage::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ErrorMessage::NAME, ErrorMessage::PLUGIN, pass, fail).test_and_snapshot();
 }

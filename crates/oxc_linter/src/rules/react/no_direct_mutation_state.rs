@@ -2,34 +2,29 @@ use oxc_ast::{
     ast::{Expression, MethodDefinitionKind, SimpleAssignmentTarget, StaticMemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{
-    context::LintContext,
+    context::{ContextHost, LintContext},
     rule::Rule,
     utils::{is_es5_component, is_es6_component},
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-react(no-direct-mutation-state): never mutate this.state directly.")]
-#[diagnostic(
-    severity(warning),
-    help("calling setState() afterwards may replace the mutation you made.")
-)]
-struct NoDirectMutationStateDiagnostic(#[label] pub Span);
+fn no_direct_mutation_state_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("never mutate this.state directly.")
+        .with_help("calling setState() afterwards may replace the mutation you made.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoDirectMutationState;
 
-// code: https://github.com/jsx-eslint/eslint-plugin-react/blob/master/lib/rules/no-direct-mutation-state.js
-// doc: https://github.com/jsx-eslint/eslint-plugin-react/blob/master/docs/rules/no-direct-mutation-state.md
-// test: https://github.com/jsx-eslint/eslint-plugin-react/blob/master/tests/lib/rules/no-direct-mutation-state.js
+// code: https://github.com/jsx-eslint/eslint-plugin-react/blob/v7.37.2/lib/rules/no-direct-mutation-state.js
+// doc: https://github.com/jsx-eslint/eslint-plugin-react/blob/v7.37.2/docs/rules/no-direct-mutation-state.md
+// test: https://github.com/jsx-eslint/eslint-plugin-react/blob/v7.37.2/tests/lib/rules/no-direct-mutation-state.js
 
 declare_oxc_lint!(
     /// ### What it does
@@ -39,7 +34,7 @@ declare_oxc_lint!(
     /// calling setState() afterwards may replace the mutation you made
     ///
     /// ### Example
-    /// ```javascript
+    /// ```jsx
     ///  // error
     ///  var Hello = createReactClass({
     ///    componentDidMount: function() {
@@ -83,8 +78,51 @@ declare_oxc_lint!(
     ///  }
     /// ```
     NoDirectMutationState,
+    react,
     correctness
 );
+
+impl Rule for NoDirectMutationState {
+    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
+        match node.kind() {
+            AstKind::AssignmentExpression(assignment_expr) => {
+                if should_ignore_component(node, ctx) {
+                    return;
+                }
+
+                if let Some(assignment) = assignment_expr.left.as_simple_assignment_target() {
+                    if let Some(outer_member_expression) = get_outer_member_expression(assignment) {
+                        if is_state_member_expression(outer_member_expression) {
+                            ctx.diagnostic(no_direct_mutation_state_diagnostic(
+                                assignment_expr.left.span(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            AstKind::UpdateExpression(update_expr) => {
+                if should_ignore_component(node, ctx) {
+                    return;
+                }
+
+                if let Some(outer_member_expression) =
+                    get_outer_member_expression(&update_expr.argument)
+                {
+                    if is_state_member_expression(outer_member_expression) {
+                        ctx.diagnostic(no_direct_mutation_state_diagnostic(update_expr.span));
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
+    }
+}
 
 // check current node is this.state.xx
 fn is_state_member_expression(expression: &StaticMemberExpression<'_>) -> bool {
@@ -135,65 +173,31 @@ fn get_static_member_expression_obj<'a, 'b>(
 }
 
 fn should_ignore_component<'a, 'b>(node: &'b AstNode<'a>, ctx: &'b LintContext<'a>) -> bool {
-    let mut is_constructor: bool = false;
-    let mut is_call_expression_node: bool = false;
-    let mut is_component: bool = false;
+    let mut is_constructor = false;
+    let mut is_call_expression = false;
+    let mut is_component = false;
 
-    for parent in ctx.nodes().iter_parents(node.id()) {
+    for parent in ctx.nodes().ancestors(node.id()) {
         if let AstKind::MethodDefinition(method_def) = parent.kind() {
             if method_def.kind == MethodDefinitionKind::Constructor {
                 is_constructor = true;
             }
         }
 
-        if let AstKind::CallExpression(_) = parent.kind() {
-            is_call_expression_node = true;
+        if matches!(parent.kind(), AstKind::CallExpression(_)) {
+            is_call_expression = true;
         }
 
         if is_es6_component(parent) || is_es5_component(parent) {
             is_component = true;
         }
-    }
 
-    is_constructor && !is_call_expression_node || !is_component
-}
-
-impl Rule for NoDirectMutationState {
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        match node.kind() {
-            AstKind::AssignmentExpression(assignment_expr) => {
-                if should_ignore_component(node, ctx) {
-                    return;
-                }
-
-                if let Some(assignment) = assignment_expr.left.as_simple_assignment_target() {
-                    if let Some(outer_member_expression) = get_outer_member_expression(assignment) {
-                        if is_state_member_expression(outer_member_expression) {
-                            ctx.diagnostic(NoDirectMutationStateDiagnostic(
-                                assignment_expr.left.span(),
-                            ));
-                        }
-                    }
-                }
-            }
-
-            AstKind::UpdateExpression(update_expr) => {
-                if should_ignore_component(node, ctx) {
-                    return;
-                }
-
-                if let Some(outer_member_expression) =
-                    get_outer_member_expression(&update_expr.argument)
-                {
-                    if is_state_member_expression(outer_member_expression) {
-                        ctx.diagnostic(NoDirectMutationStateDiagnostic(update_expr.span));
-                    }
-                }
-            }
-
-            _ => {}
+        if matches!(parent.kind(), AstKind::Class(_)) {
+            break;
         }
     }
+
+    (is_constructor && !is_call_expression) || !is_component
 }
 
 #[test]
@@ -201,16 +205,12 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
-        (
-            "var Hello = createReactClass({
+        "var Hello = createReactClass({
           render: function() {
             return <div>Hello {this.props.name}</div>;
           }
         });",
-            None,
-        ),
-        (
-            "
+        "
           var Hello = createReactClass({
             render: function() {
               var obj = {state: {}};
@@ -219,17 +219,11 @@ fn test() {
             }
           });
         ",
-            None,
-        ),
-        (
-            "
+        "
            var Hello = 'foo';
            module.exports = {};
          ",
-            None,
-        ),
-        (
-            "
+        "
            class Hello {
              getFoo() {
                this.state.foo = 'bar'
@@ -237,30 +231,21 @@ fn test() {
              }
            }
          ",
-            None,
-        ),
-        (
-            "
+        "
            class Hello extends React.Component {
              constructor() {
                this.state.foo = 'bar'
              }
            }
          ",
-            None,
-        ),
-        (
-            "
+        "
         class Hello extends React.Component {
           constructor() {
             this.state.foo = 1;
           }
         }
       ",
-            None,
-        ),
-        (
-            "
+        "
        class OneComponent extends Component {
          constructor() {
            super();
@@ -273,13 +258,22 @@ fn test() {
          }
        }
      ",
-            None,
-        ),
+        "
+     describe('Component spec', () => {
+        it('should apply default props on rerender', () => {
+          class Outer extends Component {
+            constructor() {
+              super();
+              this.state = { i: 1 };
+            }
+          }
+        });
+     });
+",
     ];
 
     let fail = vec![
-        (
-            r#"
+        r#"
                   var Hello = createReactClass({
 
                     componentWillMount() {
@@ -299,10 +293,7 @@ fn test() {
                           }
                         });
           "#,
-            None,
-        ),
-        (
-            "
+        "
                  var Hello = createReactClass({
                    render: function() {
                      this.state.foo++;
@@ -310,10 +301,7 @@ fn test() {
                    }
                  });
                ",
-            None,
-        ),
-        (
-            r#"
+        r#"
         var Hello = createReactClass({
           render: function() {
             this.state.person.name= "bar"
@@ -321,10 +309,7 @@ fn test() {
           }
         });
       "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           var Hello = createReactClass({
             render: function() {
               this.state.person.name.first = "bar"
@@ -332,10 +317,7 @@ fn test() {
             }
           });
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           var Hello = createReactClass({
             render: function() {
               this.state.person.name.first = "bar"
@@ -344,10 +326,7 @@ fn test() {
             }
           });
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             constructor() {
               someFn()
@@ -357,10 +336,7 @@ fn test() {
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             constructor(props) {
               super(props)
@@ -370,79 +346,57 @@ fn test() {
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentWillMount() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentDidMount() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentWillReceiveProps() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             shouldComponentUpdate() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentWillUpdate() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentDidUpdate() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
-        (
-            r#"
+        r#"
           class Hello extends React.Component {
             componentWillUnmount() {
               this.state.foo = "bar"
             }
           }
         "#,
-            None,
-        ),
     ];
 
-    Tester::new(NoDirectMutationState::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoDirectMutationState::NAME, NoDirectMutationState::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

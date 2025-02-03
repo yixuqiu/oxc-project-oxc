@@ -2,23 +2,19 @@ use oxc_ast::{
     ast::{BindingPatternKind, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoObjectAsDefaultParameterDiagnostic {
-    #[error("eslint-plugin-unicorn(no-object-as-default-parameter): Do not use an object literal as default for parameter `{1}`.")]
-    #[diagnostic(severity(warning))]
-    Identifier(#[label] Span, String),
-    #[error("eslint-plugin-unicorn(no-object-as-default-parameter): Do not use an object literal as default")]
-    #[diagnostic(severity(warning))]
-    NonIdentifier(#[label] Span),
+fn identifier(span: Span, param: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Do not use an object literal as default for parameter `{param}`."))
+        .with_label(span)
+}
+
+fn non_identifier(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not use an object literal as default").with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -34,23 +30,28 @@ declare_oxc_lint!(
     /// Default parameters should not be passed to a function through an object literal. The `foo = {a: false}` parameter works fine if only used with one option. As soon as additional options are added, you risk replacing the whole `foo = {a: false, b: true}` object when passing only one option: `{a: true}`. For this reason, object destructuring should be used instead.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// function foo(foo = {a: false}) {}
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// function foo(foo = {a: false}) {}
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// function foo({a = false} = {}) {}
     /// ```
     NoObjectAsDefaultParameter,
+    unicorn,
     pedantic
 );
 
 impl Rule for NoObjectAsDefaultParameter {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::AssignmentPattern(assignment_pat) = node.kind() else { return };
+        let AstKind::AssignmentPattern(assignment_pat) = node.kind() else {
+            return;
+        };
 
-        let Expression::ObjectExpression(object_expr) =
-            &assignment_pat.right.without_parenthesized()
+        let Expression::ObjectExpression(object_expr) = &assignment_pat.right.without_parentheses()
         else {
             return;
         };
@@ -59,21 +60,20 @@ impl Rule for NoObjectAsDefaultParameter {
             return;
         }
 
-        let Some(parent) = ctx.nodes().parent_node(node.id()) else { return };
+        let Some(parent) = ctx.nodes().parent_node(node.id()) else {
+            return;
+        };
 
         if !matches!(parent.kind(), AstKind::FormalParameter(_)) {
             return;
         }
 
         if let BindingPatternKind::BindingIdentifier(binding_id) = &assignment_pat.left.kind {
-            ctx.diagnostic(NoObjectAsDefaultParameterDiagnostic::Identifier(
-                object_expr.span,
-                binding_id.name.to_string(),
-            ));
+            ctx.diagnostic(identifier(object_expr.span, &binding_id.name));
             return;
         }
 
-        ctx.diagnostic(NoObjectAsDefaultParameterDiagnostic::NonIdentifier(object_expr.span));
+        ctx.diagnostic(non_identifier(object_expr.span));
     }
 }
 
@@ -133,5 +133,6 @@ fn test() {
         r"function abc([a] = {a: 123}) {}",
     ];
 
-    Tester::new(NoObjectAsDefaultParameter::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoObjectAsDefaultParameter::NAME, NoObjectAsDefaultParameter::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -2,21 +2,17 @@ use oxc_ast::{
     ast::{Argument, Expression, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(prefer-reflect-apply): Prefer Reflect.apply() over Function#apply()"
-)]
-#[diagnostic(severity(warning), help("Reflect.apply() is less verbose and easier to understand."))]
-struct PreferReflectApplyDiagnostic(#[label] pub Span);
+fn prefer_reflect_apply_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer Reflect.apply() over Function#apply()")
+        .with_help("Reflect.apply() is less verbose and easier to understand.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferReflectApply;
@@ -32,14 +28,18 @@ declare_oxc_lint!(
     /// it's not safe to assume .apply() exists or is not overridden.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// foo.apply(null, [42]);
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// foo.apply(null, [42]);
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// Reflect.apply(foo, null);
     /// ```
     PreferReflectApply,
+    unicorn,
     style
 );
 
@@ -80,7 +80,7 @@ impl Rule for PreferReflectApply {
         if is_static_property_name_equal(member_expr, "apply")
             && matches!(call_expr.arguments.as_slice(), [first, second] if is_apply_signature(first, second))
         {
-            ctx.diagnostic(PreferReflectApplyDiagnostic(call_expr.span));
+            ctx.diagnostic(prefer_reflect_apply_diagnostic(call_expr.span));
             return;
         }
 
@@ -101,7 +101,7 @@ impl Rule for PreferReflectApply {
                     if iden.name == "Function"
                         && matches!(call_expr.arguments.as_slice(), [_, second, third] if is_apply_signature(second, third))
                     {
-                        ctx.diagnostic(PreferReflectApplyDiagnostic(call_expr.span));
+                        ctx.diagnostic(prefer_reflect_apply_diagnostic(call_expr.span));
                     }
                 }
             }
@@ -144,5 +144,6 @@ fn test() {
         ("foo[\"apply\"](null, [42]);", None),
     ];
 
-    Tester::new(PreferReflectApply::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferReflectApply::NAME, PreferReflectApply::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

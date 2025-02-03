@@ -1,30 +1,23 @@
 use oxc_ast::{
-    ast::{Class, Function, JSXAttributeItem, JSXElementName},
+    ast::{Class, Function, JSXAttributeItem, JSXAttributeValue, JSXElementName},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoPageCustomFontDiagnostic {
-    #[error("eslint-plugin-next(no-page-custom-font): Custom fonts not added in `pages/_document.js` will only load for a single page. This is discouraged.")]
-    #[diagnostic(
-        severity(warning),
-        help("See: https://nextjs.org/docs/messages/no-page-custom-font")
-    )]
-    NotAddedInDocument(#[label] Span),
-    #[error("eslint-plugin-next(no-page-custom-font): Using `<link />` outside of `<Head>` will disable automatic font optimization. This is discouraged.")]
-    #[diagnostic(
-        severity(warning),
-        help("See: 'https://nextjs.org/docs/messages/no-page-custom-font")
-    )]
-    LinkOutsideOfHead(#[label] Span),
+fn not_added_in_document(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Custom fonts not added in `pages/_document.js` will only load for a single page. This is discouraged.")
+        .with_help("See: https://nextjs.org/docs/messages/no-page-custom-font")
+        .with_label(span)
+}
+
+fn link_outside_of_head(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Using `<link />` outside of `<Head>` will disable automatic font optimization. This is discouraged.")
+        .with_help("See: 'https://nextjs.org/docs/messages/no-page-custom-font")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -42,94 +35,96 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoPageCustomFont,
+    nextjs,
     correctness,
 );
 
 impl Rule for NoPageCustomFont {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::JSXOpeningElement(element) = node.kind() else { return };
-        if matches!(&element.name, JSXElementName::Identifier(ident) if ident.name != "link") {
+        let AstKind::JSXOpeningElement(element) = node.kind() else {
+            return;
+        };
+        let JSXElementName::Identifier(ident) = &element.name else { return };
+
+        if ident.name != "link" {
             return;
         }
-        let is_custom_font = element.attributes.iter().any(
-            |attr| matches!(&attr, JSXAttributeItem::Attribute(attr) if attr.is_identifier("href") && attr.value.is_some()),
-        );
+
+        let is_custom_font = element.attributes.iter().any(|attr| {
+            matches!(&attr,
+              JSXAttributeItem::Attribute(attr) if attr.is_identifier("href") && attr.value.as_ref().is_some_and(|value|
+              matches!(value, JSXAttributeValue::StringLiteral(literal) if literal.value.starts_with("https://fonts.googleapis.com/css"))
+            ))
+        });
 
         if !is_custom_font {
             return;
         }
 
-        let mut is_inside_export_default = false;
-        for parent_node in ctx.nodes().iter_parents(node.id()) {
-            // export default function/class
-            let kind = parent_node.kind();
-            if matches!(kind, AstKind::ExportDefaultDeclaration(_)) {
-                is_inside_export_default = true;
-                break;
-            }
-
-            // function variable() {}; export default variable;
-            let id = match kind {
-                AstKind::ArrowFunctionExpression(_) => None,
-                AstKind::Function(Function { id, .. }) | AstKind::Class(Class { id, .. }) => {
-                    id.clone()
-                }
-                _ => continue,
-            };
-
-            let name = id.map_or_else(
-                || {
-                    let parent_parent_kind = ctx.nodes().parent_kind(parent_node.id())?;
-
-                    let AstKind::VariableDeclarator(declarator) = parent_parent_kind else {
-                        return None;
-                    };
-                    declarator.id.get_identifier().map(ToString::to_string)
-                },
-                |id| Some(id.name.to_string()),
-            );
-            let Some(name) = name else {
-                continue;
-            };
-            if let Some(symbol_id) = ctx.scopes().get_root_binding(&name) {
-                if ctx.symbols().get_flag(symbol_id).is_export() {
-                    let is_export_default =
-                        ctx.symbols().get_resolved_references(symbol_id).any(|reference| {
-                            reference.is_read()
-                                && matches!(
-                                    ctx.nodes().parent_kind(reference.node_id()),
-                                    Some(AstKind::ExportDefaultDeclaration(_))
-                                )
-                        });
-
-                    if is_export_default {
-                        is_inside_export_default = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        let in_document = ctx.file_path().file_name().map_or(false, |file_name| {
-            file_name.to_str().map_or(false, |file_name| file_name.starts_with("_document."))
+        let in_document = ctx.file_path().file_name().is_some_and(|file_name| {
+            file_name.to_str().is_some_and(|file_name| file_name.starts_with("_document."))
         });
         let span = ctx.nodes().parent_kind(node.id()).unwrap().span();
         let diagnostic = if in_document {
-            if is_inside_export_default {
+            if is_inside_export_default(node, ctx) {
                 return;
             }
-            NoPageCustomFontDiagnostic::LinkOutsideOfHead(span)
+            link_outside_of_head(span)
         } else {
-            NoPageCustomFontDiagnostic::NotAddedInDocument(span)
+            not_added_in_document(span)
         };
         ctx.diagnostic(diagnostic);
     }
 }
 
+fn is_inside_export_default(node: &AstNode<'_>, ctx: &LintContext<'_>) -> bool {
+    let mut is_inside_export_default = false;
+    for parent_node in ctx.nodes().ancestors(node.id()) {
+        // export default function/class
+        let kind = parent_node.kind();
+        if matches!(kind, AstKind::ExportDefaultDeclaration(_)) {
+            is_inside_export_default = true;
+            break;
+        }
+
+        // function variable() {}; export default variable;
+        let id = match kind {
+            AstKind::ArrowFunctionExpression(_) => None,
+            AstKind::Function(Function { id, .. }) | AstKind::Class(Class { id, .. }) => id.clone(),
+            _ => continue,
+        };
+
+        let name = id.map_or_else(
+            || {
+                let parent_parent_kind = ctx.nodes().parent_kind(parent_node.id())?;
+
+                let AstKind::VariableDeclarator(declarator) = parent_parent_kind else {
+                    return None;
+                };
+                declarator.id.get_identifier_name().map(|id| id.to_string())
+            },
+            |id| Some(id.name.to_string()),
+        );
+        let Some(name) = name else {
+            continue;
+        };
+        if ctx
+            .module_record()
+            .local_export_entries
+            .iter()
+            .any(|e| e.local_name.is_default() && e.local_name.name().is_some_and(|n| n == name))
+        {
+            is_inside_export_default = true;
+        }
+    }
+    is_inside_export_default
+}
+
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use std::path::PathBuf;
+
+    use crate::tester::Tester;
 
     let filename = Some(PathBuf::from("pages/_document.jsx"));
     let pass = vec![
@@ -206,7 +201,7 @@ fn test() {
 			        </Html>
 			      )
 			    }
-			
+
 			    export default CustomDocument;
 			    "#,
             None,
@@ -230,7 +225,7 @@ fn test() {
 			          );
 			        }
 			      }
-			
+
 			      export default MyDocument;"#,
             None,
             None,
@@ -245,6 +240,23 @@ fn test() {
 			              href="https://fonts.googleapis.com/css2?family=Krona+One&display=swap"
 			              rel="stylesheet"
 			            />
+			          </Head>
+			        </Html>
+			      )
+			    }"#,
+            None,
+            None,
+            filename.clone(),
+        ),
+        (
+            r#"function a() {
+			      return (
+			        <Html>
+			          <Head>
+                  <link
+                    rel="apple-touch-startup-image"
+                    href="/assets/public/pwa/splash/apple-splash-2048-2732.jpg"
+                  />
 			          </Head>
 			        </Html>
 			      )
@@ -280,8 +292,8 @@ fn test() {
         (
             r#"
 			      import Head from 'next/head'
-			
-			
+
+
 			      function Links() {
 			        return (
 			          <>
@@ -296,7 +308,7 @@ fn test() {
 			          </>
 			        )
 			      }
-			
+
 			      export default function IndexPage() {
 			        return (
 			          <div>
@@ -314,5 +326,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoPageCustomFont::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoPageCustomFont::NAME, NoPageCustomFont::PLUGIN, pass, fail).test_and_snapshot();
 }

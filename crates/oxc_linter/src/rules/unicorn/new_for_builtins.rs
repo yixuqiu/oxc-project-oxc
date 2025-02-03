@@ -2,10 +2,7 @@ use oxc_ast::{
     ast::{match_member_expression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::BinaryOperator;
@@ -13,14 +10,12 @@ use phf::phf_set;
 
 use crate::{context::LintContext, globals::GLOBAL_OBJECT_NAMES, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NewForBuiltinsDiagnostic {
-    #[error("eslint-plugin-unicorn(new-for-builtins): Use `new {1}()` instead of `{1}()`")]
-    #[diagnostic(severity(warning))]
-    Enforce(#[label] Span, String),
-    #[error("eslint-plugin-unicorn(new-for-builtins): Use `{1}()` instead of `new {1}()`")]
-    #[diagnostic(severity(warning))]
-    Disallow(#[label] Span, String),
+fn enforce(span: Span, fn_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Use `new {fn_name}()` instead of `{fn_name}()`")).with_label(span)
+}
+
+fn disallow(span: Span, fn_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Use `{fn_name}()` instead of `new {fn_name}()`")).with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -40,17 +35,21 @@ declare_oxc_lint!(
     /// They work the same, but `new` should be preferred for consistency with other constructors.
     ///
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// const foo = new String('hello world');
     /// const bar = Array(1, 2, 3);
+    /// ```
     ///
-    /// // good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const foo = String('hello world');
     /// const bar = new Array(1, 2, 3);
     /// ```
     NewForBuiltins,
+    unicorn,
     pedantic
 );
 
@@ -58,20 +57,19 @@ impl Rule for NewForBuiltins {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         match node.kind() {
             AstKind::NewExpression(new_expr) => {
-                let callee = new_expr.callee.without_parenthesized();
+                let callee = new_expr.callee.without_parentheses();
 
-                let Some(builtin_name) = is_expr_global_builtin(callee, ctx) else { return };
+                let Some(builtin_name) = is_expr_global_builtin(callee, ctx) else {
+                    return;
+                };
 
                 if DISALLOW_NEW_FOR_BUILTINS.contains(builtin_name) {
-                    ctx.diagnostic(NewForBuiltinsDiagnostic::Disallow(
-                        new_expr.span,
-                        builtin_name.to_string(),
-                    ));
+                    ctx.diagnostic(disallow(new_expr.span, builtin_name));
                 }
             }
             AstKind::CallExpression(call_expr) => {
                 let Some(builtin_name) =
-                    is_expr_global_builtin(call_expr.callee.without_parenthesized(), ctx)
+                    is_expr_global_builtin(call_expr.callee.without_parentheses(), ctx)
                 else {
                     return;
                 };
@@ -89,10 +87,7 @@ impl Rule for NewForBuiltins {
                         }
                     }
 
-                    ctx.diagnostic(NewForBuiltinsDiagnostic::Enforce(
-                        call_expr.span,
-                        builtin_name.to_string(),
-                    ));
+                    ctx.diagnostic(enforce(call_expr.span, builtin_name));
                 }
             }
             _ => {}
@@ -113,13 +108,15 @@ fn is_expr_global_builtin<'a, 'b>(
         }
         match_member_expression!(Expression) => {
             let member_expr = expr.to_member_expression();
-            let Expression::Identifier(ident) = member_expr.object() else { return None };
+            let Expression::Identifier(ident) = member_expr.object() else {
+                return None;
+            };
 
             if !GLOBAL_OBJECT_NAMES.contains(ident.name.as_str()) {
                 return None;
             }
 
-            return member_expr.static_property_name();
+            member_expr.static_property_name()
         }
         _ => None,
     }
@@ -291,5 +288,5 @@ fn test() {
         ",
     ];
 
-    Tester::new(NewForBuiltins::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NewForBuiltins::NAME, NewForBuiltins::PLUGIN, pass, fail).test_and_snapshot();
 }

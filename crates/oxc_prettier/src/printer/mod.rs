@@ -1,19 +1,20 @@
 //! [Doc] Printer
 //!
 //! References:
-//! * <https://github.com/prettier/prettier/blob/main/src/document/printer.js>
+//! * <https://github.com/prettier/prettier/blob/3.3.3/src/document/printer.js>
 
 mod command;
 
+use std::collections::VecDeque;
+
 use oxc_allocator::Allocator;
-use std::collections::{HashMap, VecDeque};
+use rustc_hash::FxHashMap;
 
 use crate::{
-    doc::{Doc, DocBuilder, Fill, IfBreak, IndentIfBreak, Line},
+    ir::{Doc, Fill, IfBreak, IndentIfBreak, Line},
+    printer::command::{Command, Indent, Mode},
     GroupId, PrettierOptions,
 };
-
-use self::command::{Command, Indent, Mode};
 
 pub struct Printer<'a> {
     options: PrettierOptions,
@@ -27,19 +28,12 @@ pub struct Printer<'a> {
     cmds: Vec<Command<'a>>,
 
     line_suffix: Vec<Command<'a>>,
-    group_mode_map: HashMap<GroupId, Mode>,
+    group_mode_map: FxHashMap<GroupId, Mode>,
 
     // states
     new_line: &'static str,
 
     allocator: &'a Allocator,
-}
-
-impl<'a> DocBuilder<'a> for Printer<'a> {
-    #[inline]
-    fn allocator(&self) -> &'a Allocator {
-        self.allocator
-    }
 }
 
 impl<'a> Printer<'a> {
@@ -59,7 +53,7 @@ impl<'a> Printer<'a> {
             pos: 0,
             cmds,
             line_suffix: vec![],
-            group_mode_map: HashMap::new(),
+            group_mode_map: FxHashMap::default(),
             new_line: options.end_of_line.as_str(),
             allocator,
         }
@@ -68,10 +62,8 @@ impl<'a> Printer<'a> {
     pub fn build(mut self) -> String {
         self.print_doc_to_string();
         // SAFETY: We should have constructed valid UTF8 strings
-        #[allow(unsafe_code)]
-        unsafe {
-            String::from_utf8_unchecked(self.out)
-        }
+
+        unsafe { String::from_utf8_unchecked(self.out) }
     }
 
     /// Turn Doc into a string
@@ -89,6 +81,7 @@ impl<'a> Printer<'a> {
                 Doc::IndentIfBreak(docs) => self.handle_indent_if_break(indent, mode, docs),
                 Doc::Line(line) => self.handle_line(line, indent, mode, doc),
                 Doc::LineSuffix(docs) => self.handle_line_suffix(indent, mode, docs),
+                Doc::LineSuffixBoundary => self.handle_line_suffix_boundary(indent, mode),
                 Doc::IfBreak(if_break) => self.handle_if_break(if_break, indent, mode),
                 Doc::Fill(fill) => self.handle_fill(indent, mode, fill),
                 Doc::BreakParent => { /* No op */ }
@@ -132,7 +125,7 @@ impl<'a> Printer<'a> {
                     Command::new(indent, if group.should_break { Mode::Break } else { mode }, doc)
                 }));
 
-                self.set_group_mode_from_last_cmd(group.id);
+                self.set_group_mode_from_last_cmd(group.group_id);
             }
             Mode::Break => {
                 #[allow(clippy::cast_possible_wrap)]
@@ -141,7 +134,7 @@ impl<'a> Printer<'a> {
                     unreachable!();
                 };
                 let should_break = group.should_break;
-                let group_id = group.id;
+                let group_id = group.group_id;
                 let cmd = Command::new(indent, Mode::Flat, doc);
                 if !should_break && self.fits(&cmd, remaining_width) {
                     self.cmds.push(Command::new(indent, Mode::Flat, cmd.doc));
@@ -178,20 +171,18 @@ impl<'a> Printer<'a> {
 
     fn handle_indent_if_break(&mut self, indent: Indent, mode: Mode, doc: IndentIfBreak<'a>) {
         let IndentIfBreak { contents, group_id } = doc;
-        let group_mode = group_id.map_or(Some(mode), |id| self.group_mode_map.get(&id).copied());
+        let group_mode = self.group_mode_map.get(&group_id).copied();
 
         match group_mode {
             Some(Mode::Flat) => {
-                self.cmds
-                    .extend(contents.into_iter().rev().map(|doc| Command::new(indent, mode, doc)));
+                self.cmds.push(Command::new(indent, mode, contents.unbox()));
             }
             Some(Mode::Break) => {
-                self.cmds.extend(
-                    contents
-                        .into_iter()
-                        .rev()
-                        .map(|doc| Command::new(Indent::new(indent.length + 1), mode, doc)),
-                );
+                self.cmds.push(Command::new(
+                    Indent::new(indent.length + 1),
+                    mode,
+                    contents.unbox(),
+                ));
             }
             None => {}
         }
@@ -237,13 +228,23 @@ impl<'a> Printer<'a> {
         self.line_suffix.push(Command { indent, mode, doc: Doc::Array(docs) });
     }
 
+    fn handle_line_suffix_boundary(&mut self, indent: Indent, mode: Mode) {
+        if !self.line_suffix.is_empty() {
+            self.cmds.push(Command {
+                indent,
+                mode,
+                doc: Doc::Line(Line { hard: true, ..Line::default() }),
+            });
+        }
+    }
+
     fn handle_if_break(&mut self, if_break: IfBreak<'a>, indent: Indent, mode: Mode) {
-        let IfBreak { break_contents, flat_content, group_id } = if_break;
+        let IfBreak { break_contents, flat_contents, group_id } = if_break;
         let group_mode = group_id.map_or(Some(mode), |id| self.group_mode_map.get(&id).copied());
 
         match group_mode {
             Some(Mode::Flat) => {
-                self.cmds.push(Command::new(indent, Mode::Flat, flat_content.unbox()));
+                self.cmds.push(Command::new(indent, Mode::Flat, flat_contents.unbox()));
             }
             Some(Mode::Break) => {
                 self.cmds.push(Command::new(indent, Mode::Break, break_contents.unbox()));
@@ -295,7 +296,7 @@ impl<'a> Printer<'a> {
         let Some(second_content) = fill.dequeue() else {
             return;
         };
-        let mut docs = self.vec();
+        let mut docs = oxc_allocator::Vec::new_in(self.allocator);
         let content = content_flat_cmd.doc;
         docs.push(content);
         docs.push(whitespace_flat_cmd.doc);
@@ -373,9 +374,10 @@ impl<'a> Printer<'a> {
                 Doc::Str(string) => {
                     remaining_width -= string.len() as isize;
                 }
-                Doc::IndentIfBreak(IndentIfBreak { contents: docs, .. })
-                | Doc::Indent(docs)
-                | Doc::Array(docs) => {
+                Doc::IndentIfBreak(IndentIfBreak { contents, .. }) => {
+                    queue.push_front((mode, contents));
+                }
+                Doc::Indent(docs) | Doc::Array(docs) => {
                     // Prepend docs to the queue
                     for d in docs.iter().rev() {
                         queue.push_front((mode, d));
@@ -402,7 +404,7 @@ impl<'a> Printer<'a> {
                     let contents = if group_mode.is_break() {
                         &if_break_doc.break_contents
                     } else {
-                        &if_break_doc.flat_content
+                        &if_break_doc.flat_contents
                     };
 
                     queue.push_front((mode, contents));
@@ -423,6 +425,12 @@ impl<'a> Printer<'a> {
                 Doc::LineSuffix(_) => {
                     break;
                 }
+                Doc::LineSuffixBoundary => {
+                    if !self.line_suffix.is_empty() {
+                        return false;
+                    }
+                    break;
+                }
                 Doc::BreakParent => {}
             }
 
@@ -441,7 +449,7 @@ impl<'a> Printer<'a> {
     }
 
     /// Reference:
-    /// * <https://github.com/prettier/prettier/blob/main/src/document/utils.js#L156-L185>
+    /// * <https://github.com/prettier/prettier/blob/3.3.3/src/document/utils.js#L156-L185>
     pub fn propagate_breaks(doc: &mut Doc<'_>) -> bool {
         let check_array = |arr: &mut oxc_allocator::Vec<'_, Doc<'_>>| {
             arr.iter_mut().rev().any(|doc| Self::propagate_breaks(doc))
@@ -463,9 +471,8 @@ impl<'a> Printer<'a> {
                 group.should_break
             }
             Doc::IfBreak(d) => Self::propagate_breaks(&mut d.break_contents),
-            Doc::Array(arr)
-            | Doc::Indent(arr)
-            | Doc::IndentIfBreak(IndentIfBreak { contents: arr, .. }) => check_array(arr),
+            Doc::Array(arr) | Doc::Indent(arr) => check_array(arr),
+            Doc::IndentIfBreak(IndentIfBreak { contents, .. }) => Self::propagate_breaks(contents),
             _ => false,
         }
     }

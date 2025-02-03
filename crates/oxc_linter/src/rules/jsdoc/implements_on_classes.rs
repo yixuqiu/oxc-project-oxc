@@ -1,3 +1,8 @@
+use oxc_ast::AstKind;
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_macros::declare_oxc_lint;
+use oxc_span::Span;
+
 use crate::{
     ast_util::is_function_node,
     context::LintContext,
@@ -5,35 +10,38 @@ use crate::{
     utils::{get_function_nearest_jsdoc_node, should_ignore_as_internal, should_ignore_as_private},
     AstNode,
 };
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-jsdoc(implements-on-classes): `@implements` used on a non-constructor function"
-)]
-#[diagnostic(severity(warning), help("Add `@class` tag or use ES6 class syntax."))]
-struct ImplementsOnClassesDiagnostic(#[label] pub Span);
+fn implements_on_classes_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("`@implements` used on a non-constructor function")
+        .with_help("Add `@class` tag or use ES6 class syntax.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ImplementsOnClasses;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Reports an issue with any non-constructor function using `@implements`.
     ///
     /// ### Why is this bad?
+    ///
     /// Constructor functions should be
     /// whether marked with `@class`, `@constructs`, or being an ES6 class constructor.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Passing
+    /// /**
+    ///  * @implements {SomeClass}
+    ///  */
+    /// function quux () {}
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// class Foo {
     ///   /**
     ///    * @implements {SomeClass}
@@ -45,14 +53,9 @@ declare_oxc_lint!(
     ///  * @class
     ///  */
     /// function quux () {}
-    ///
-    /// // Failing
-    /// /**
-    ///  * @implements {SomeClass}
-    ///  */
-    /// function quux () {}
     /// ```
     ImplementsOnClasses,
+    jsdoc,
     correctness
 );
 
@@ -116,7 +119,7 @@ impl Rule for ImplementsOnClasses {
 
         if let Some(span) = implements_found {
             if !class_or_ctor_found {
-                ctx.diagnostic(ImplementsOnClassesDiagnostic(span));
+                ctx.diagnostic(implements_on_classes_diagnostic(span));
             }
         }
     }
@@ -291,5 +294,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(ImplementsOnClasses::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ImplementsOnClasses::NAME, ImplementsOnClasses::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

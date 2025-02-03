@@ -1,10 +1,7 @@
 use oxc_ast::{ast::JSXAttributeValue, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{GetSpan, Span};
+use oxc_span::{CompactStr, GetSpan, Span};
 
 use crate::{
     context::LintContext,
@@ -14,15 +11,16 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum MouseEventsHaveKeyEventsDiagnostic {
-    #[error("eslint-plugin-jsx-a11y(mouse-events-have-key-events): {1} must be accompanied by onFocus for accessibility.")]
-    #[diagnostic(severity(warning), help("Try to add onFocus."))]
-    MissOnFocus(#[label] Span, String),
+fn miss_on_focus(span: Span, attr_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{attr_name} must be accompanied by onFocus for accessibility."))
+        .with_help("Try to add onFocus.")
+        .with_label(span)
+}
 
-    #[error("eslint-plugin-jsx-a11y(mouse-events-have-key-events): {1} must be accompanied by onBlur for accessibility.")]
-    #[diagnostic(severity(warning), help("Try to add onBlur."))]
-    MissOnBlur(#[label] Span, String),
+fn miss_on_blur(span: Span, attr_name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{attr_name} must be accompanied by onBlur for accessibility."))
+        .with_help("Try to add onBlur.")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -30,15 +28,15 @@ pub struct MouseEventsHaveKeyEvents(Box<MouseEventsHaveKeyEventsConfig>);
 
 #[derive(Debug, Clone)]
 pub struct MouseEventsHaveKeyEventsConfig {
-    hover_in_handlers: Vec<String>,
-    hover_out_handlers: Vec<String>,
+    hover_in_handlers: Vec<CompactStr>,
+    hover_out_handlers: Vec<CompactStr>,
 }
 
 impl Default for MouseEventsHaveKeyEventsConfig {
     fn default() -> Self {
         Self {
-            hover_in_handlers: vec!["onMouseOver".to_string()],
-            hover_out_handlers: vec!["onMouseOut".to_string()],
+            hover_in_handlers: vec!["onMouseOver".into()],
+            hover_out_handlers: vec!["onMouseOut".into()],
         }
     }
 }
@@ -54,14 +52,18 @@ declare_oxc_lint!(
     /// AT compatibility, and screenreader users.
     ///
     /// ### Example
-    /// ```jsx
-    /// // Good
-    /// <div onMouseOver={() => void 0} onFocus={() => void 0} />
     ///
-    /// // Bad
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <div onMouseOver={() => void 0} />
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
+    /// <div onMouseOver={() => void 0} onFocus={() => void 0} />
+    /// ```
     MouseEventsHaveKeyEvents,
+    jsx_a11y,
     correctness
 );
 
@@ -77,7 +79,7 @@ impl Rule for MouseEventsHaveKeyEvents {
             config.hover_in_handlers = hover_in_handlers_config
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .map(ToString::to_string)
+                .map(CompactStr::from)
                 .collect();
         }
 
@@ -89,7 +91,7 @@ impl Rule for MouseEventsHaveKeyEvents {
             config.hover_out_handlers = hover_out_handlers_config
                 .iter()
                 .filter_map(serde_json::Value::as_str)
-                .map(ToString::to_string)
+                .map(CompactStr::from)
                 .collect();
         }
 
@@ -101,9 +103,7 @@ impl Rule for MouseEventsHaveKeyEvents {
             return;
         };
 
-        let Some(el_type) = get_element_type(ctx, jsx_opening_el) else {
-            return;
-        };
+        let el_type = get_element_type(ctx, jsx_opening_el);
 
         if !HTML_TAG.contains(&el_type) {
             return;
@@ -119,18 +119,12 @@ impl Rule for MouseEventsHaveKeyEvents {
                     Some(JSXAttributeValue::ExpressionContainer(container)) => {
                         if let Some(expr) = container.expression.as_expression() {
                             if expr.is_undefined() {
-                                ctx.diagnostic(MouseEventsHaveKeyEventsDiagnostic::MissOnFocus(
-                                    jsx_attr.span(),
-                                    String::from(handler),
-                                ));
+                                ctx.diagnostic(miss_on_focus(jsx_attr.span(), handler));
                             }
                         }
                     }
                     None => {
-                        ctx.diagnostic(MouseEventsHaveKeyEventsDiagnostic::MissOnFocus(
-                            jsx_attr.span(),
-                            String::from(handler),
-                        ));
+                        ctx.diagnostic(miss_on_focus(jsx_attr.span(), handler));
                     }
                     _ => {}
                 }
@@ -148,17 +142,11 @@ impl Rule for MouseEventsHaveKeyEvents {
                 match has_jsx_prop(jsx_opening_el, "onBlur").and_then(get_prop_value) {
                     Some(JSXAttributeValue::ExpressionContainer(container)) => {
                         if container.expression.is_undefined() {
-                            ctx.diagnostic(MouseEventsHaveKeyEventsDiagnostic::MissOnBlur(
-                                jsx_attr.span(),
-                                String::from(handler),
-                            ));
+                            ctx.diagnostic(miss_on_blur(jsx_attr.span(), handler));
                         }
                     }
                     None => {
-                        ctx.diagnostic(MouseEventsHaveKeyEventsDiagnostic::MissOnBlur(
-                            jsx_attr.span(),
-                            String::from(handler),
-                        ));
+                        ctx.diagnostic(miss_on_blur(jsx_attr.span(), handler));
                     }
                     _ => {}
                 }
@@ -263,5 +251,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(MouseEventsHaveKeyEvents::NAME, pass, fail).test_and_snapshot();
+    Tester::new(MouseEventsHaveKeyEvents::NAME, MouseEventsHaveKeyEvents::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -1,8 +1,4 @@
-use miette::{miette, LabeledSpan};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic, Severity},
-    thiserror::Error,
-};
+use oxc_diagnostics::{LabeledSpan, OxcDiagnostic};
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -13,14 +9,10 @@ use crate::{
     utils::{should_ignore_as_internal, should_ignore_as_private},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum CheckPropertyNamesDiagnostic {
-    #[error("eslint-plugin-jsdoc(check-property-names): No root defined for @property path.")]
-    #[diagnostic(
-        severity(warning),
-        help("@property path declaration `{1}` appears before any real property.")
-    )]
-    NoRoot(#[label] Span, String),
+fn no_root(span: Span, x1: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("No root defined for @property path.")
+        .with_help(format!("@property path declaration `{x1}` appears before any real property."))
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -28,25 +20,17 @@ pub struct CheckPropertyNames;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Ensures that property names in JSDoc are not duplicated on the same block and that nested properties have defined roots.
     ///
     /// ### Why is this bad?
+    ///
     /// `@property` tags with the same name can be confusing and may indicate a mistake.
     ///
-    /// ### Example
-    /// ```javascript
-    /// // Passing
-    /// /**
-    ///  * @typedef {object} state
-    ///  * @property {number} foo
-    ///  */
-    /// /**
-    ///  * @typedef {object} state
-    ///  * @property {object} foo
-    ///  * @property {number} foo.bar
-    ///  */
+    /// ### Examples
     ///
-    /// // Failing
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// /**
     ///  * @typedef {object} state
     ///  * @property {number} foo
@@ -58,7 +42,22 @@ declare_oxc_lint!(
     ///  * @property {number} foo.bar
     ///  */
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /**
+    ///  * @typedef {object} state
+    ///  * @property {number} foo
+    ///  */
+    ///
+    /// /**
+    ///  * @typedef {object} state
+    ///  * @property {object} foo
+    ///  * @property {number} foo.bar
+    ///  */
+    /// ```
     CheckPropertyNames,
+    jsdoc,
     correctness
 );
 
@@ -95,10 +94,7 @@ impl Rule for CheckPropertyNames {
                     let parent_name = parent_name.trim_end_matches("[]");
 
                     if !seen.contains_key(&parent_name) {
-                        ctx.diagnostic(CheckPropertyNamesDiagnostic::NoRoot(
-                            name_part.span,
-                            type_name.to_string(),
-                        ));
+                        ctx.diagnostic(no_root(name_part.span, type_name));
                     }
                 }
 
@@ -107,18 +103,22 @@ impl Rule for CheckPropertyNames {
             }
 
             for (type_name, spans) in seen.iter().filter(|(_, spans)| 1 < spans.len()) {
-                ctx.diagnostic(miette!(
-                    severity = Severity::Warning,
-                    labels = spans
-                        .iter()
-                        .map(|span| LabeledSpan::at(
+                let labels = spans
+                    .iter()
+                    .map(|span| {
+                        LabeledSpan::at(
                             (span.start as usize)..(span.end as usize),
-                            "Duplicated property".to_string(),
+                            "Duplicated property",
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                ctx.diagnostic(
+                    OxcDiagnostic::warn("Duplicate @property found.")
+                        .with_help(format!(
+                            "@property `{type_name}` is duplicated on the same block."
                         ))
-                        .collect::<Vec<_>>(),
-                    help = format!("@property `{type_name}` is duplicated on the same block."),
-                    "eslint-plugin-jsdoc(check-property-names): Duplicate @property found."
-                ));
+                        .with_labels(labels),
+                );
             }
         }
     }
@@ -427,5 +427,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(CheckPropertyNames::NAME, pass, fail).test_and_snapshot();
+    Tester::new(CheckPropertyNames::NAME, CheckPropertyNames::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -2,20 +2,19 @@ use oxc_ast::{
     ast::{AssignmentTarget, AssignmentTargetProperty, BindingPatternKind},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
-use oxc_span::GetSpan;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-useless-rename): Disallow renaming import, export, and destructured assignments to the same name")]
-#[diagnostic(severity(warning), help("Either remove the renaming or rename the variable."))]
-struct NoUselessRenameDiagnostic(#[label] pub Span);
+fn no_useless_rename_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Do not rename import, export, or destructured assignments to the same name",
+    )
+    .with_help("Use the variable's original name or rename it to a different name")
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUselessRename(Box<NoUselessRenameConfig>);
@@ -46,18 +45,22 @@ declare_oxc_lint!(
     /// It is unnecessary to rename a variable to the same name.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// import { foo as foo } from 'foo';
     /// const { bar: bar } = obj;
     /// export { baz as baz };
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// import { foo } from 'foo';
     /// const { bar: renamed } = obj;
     /// export { baz };
     /// ```
     NoUselessRename,
+    eslint,
     correctness
 );
 
@@ -93,24 +96,25 @@ impl Rule for NoUselessRename {
                         continue;
                     }
 
-                    let Some(key) = property.key.static_name() else { continue };
+                    let Some(key) = property.key.static_name() else {
+                        continue;
+                    };
 
                     let renamed_key = match &property.value.kind {
                         BindingPatternKind::AssignmentPattern(assignment_pattern) => {
                             match &assignment_pattern.left.kind {
                                 BindingPatternKind::BindingIdentifier(binding_ident) => {
-                                    &binding_ident.name
+                                    binding_ident.name
                                 }
                                 _ => continue,
                             }
                         }
-
-                        BindingPatternKind::BindingIdentifier(binding_ident) => &binding_ident.name,
+                        BindingPatternKind::BindingIdentifier(binding_ident) => binding_ident.name,
                         _ => continue,
                     };
 
                     if key == renamed_key {
-                        ctx.diagnostic(NoUselessRenameDiagnostic(property.span));
+                        ctx.diagnostic(no_useless_rename_diagnostic(property.span));
                     }
                 }
             }
@@ -126,12 +130,15 @@ impl Rule for NoUselessRename {
                     else {
                         continue;
                     };
-
-                    let Some(key) = property.name.static_name() else { continue };
-                    let Some(renamed_key) = property.binding.name() else { continue };
-
+                    let Some(key) = property.name.static_name() else {
+                        continue;
+                    };
+                    let Some(renamed_key) = property.binding.identifier().map(|ident| ident.name)
+                    else {
+                        continue;
+                    };
                     if key == renamed_key {
-                        ctx.diagnostic(NoUselessRenameDiagnostic(property.span));
+                        ctx.diagnostic(no_useless_rename_diagnostic(property.span));
                     }
                 }
             }
@@ -140,7 +147,7 @@ impl Rule for NoUselessRename {
                     && import_specifier.imported.span() != import_specifier.local.span
                     && import_specifier.local.name == import_specifier.imported.name()
                 {
-                    ctx.diagnostic(NoUselessRenameDiagnostic(import_specifier.local.span));
+                    ctx.diagnostic(no_useless_rename_diagnostic(import_specifier.local.span));
                 }
             }
             AstKind::ExportNamedDeclaration(export_named_decl) => {
@@ -151,7 +158,7 @@ impl Rule for NoUselessRename {
                     if specifier.local.span() != specifier.exported.span()
                         && specifier.local.name() == specifier.exported.name()
                     {
-                        ctx.diagnostic(NoUselessRenameDiagnostic(specifier.local.span()));
+                        ctx.diagnostic(no_useless_rename_diagnostic(specifier.local.span()));
                     }
                 }
             }
@@ -389,5 +396,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoUselessRename::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUselessRename::NAME, NoUselessRename::PLUGIN, pass, fail).test_and_snapshot();
 }

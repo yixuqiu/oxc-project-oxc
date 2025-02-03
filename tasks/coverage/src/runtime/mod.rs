@@ -1,93 +1,97 @@
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
-use oxc_tasks_common::{agent, project_root};
-use phf::{phf_set, Set};
-
-use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions};
-use oxc_parser::Parser;
-use oxc_span::SourceType;
 use serde_json::json;
+
+use oxc::{
+    allocator::Allocator,
+    codegen::{CodeGenerator, CodegenOptions},
+    minifier::{Minifier, MinifierOptions},
+    parser::Parser,
+    semantic::SemanticBuilder,
+    span::SourceType,
+    transformer::{HelperLoaderMode, TransformOptions, Transformer},
+};
+use oxc_tasks_common::agent;
 
 use crate::{
     suite::{Case, TestResult},
-    test262::{Test262Case, TestFlag},
+    test262::Test262Case,
+    workspace_root,
 };
 
-pub const V8_TEST_262_FAILED_TESTS_PATH: &str = "tasks/coverage/src/runtime/v8_test262.status";
+mod test262_status;
+use test262_status::get_v8_test262_failure_paths;
 
-lazy_static::lazy_static! {
-    static ref V8_TEST_262_FAILED_TESTS: HashSet<String> = {
-        let mut set = HashSet::default();
-        fs::read_to_string(project_root().join(V8_TEST_262_FAILED_TESTS_PATH))
-            .expect("Failed to read v8_test262.status")
-            .lines()
-            .for_each(|line| {
-                set.insert(line.replace(".*", "").replace('*', ""));
-            });
-        set
-    };
-}
+static SKIP_FEATURES: &[&str] = &[
+    // Node's version of V8 doesn't implement these
+    "hashbang",
+    "legacy-regexp",
+    "regexp-duplicate-named-groups",
+    "symbols-as-weakmap-keys",
+    "tail-call-optimization",
+    // We don't care about API-related things
+    "ArrayBuffer",
+    "change-array-by-copy",
+    "DataView",
+    "resizable-arraybuffer",
+    "ShadowRealm",
+    "cross-realm",
+    "SharedArrayBuffer",
+    "String.prototype.toWellFormed",
+    "Symbol.match",
+    "Symbol.replace",
+    "Symbol.unscopables",
+    "Temporal",
+    "TypedArray",
+    // Added in oxc
+    "Array.fromAsync",
+    "IsHTMLDDA",
+    "iterator-helpers",
+    "set-methods",
+    "array-grouping",
+    // stage 2
+    "Intl.DurationFormat",
+    // stage 3
+    "decorators",
+    "explicit-resource-management",
+    "source-phase-imports",
+    "import-defer",
+];
 
-static SKIP_EVALUATING_FEATURES: Set<&'static str> = phf_set! {
-  // Node's version of V8 doesn't implement these
-  "hashbang",
-  "legacy-regexp",
-  "regexp-duplicate-named-groups",
-  "symbols-as-weakmap-keys",
-  "tail-call-optimization",
-
-  // We don't care about API-related things
-  "ArrayBuffer",
-  "change-array-by-copy",
-  "DataView",
-  "resizable-arraybuffer",
-  "ShadowRealm",
-  "cross-realm",
-  "SharedArrayBuffer",
-  "String.prototype.toWellFormed",
-  "Symbol.match",
-  "Symbol.replace",
-  "Symbol.unscopables",
-  "Temporal",
-  "TypedArray",
-
-  // Added in oxc
-  "Array.fromAsync",
-  "IsHTMLDDA",
-  "iterator-helpers",
-  "set-methods",
-  "array-grouping",
-
-  // stage 2
-  "Intl.DurationFormat"
-};
-
-static SKIP_EVALUATING_THESE_INCLUDES: Set<&'static str> = phf_set! {
+static SKIP_INCLUDES: &[&str] = &[
     // We don't preserve "toString()" on functions
     "nativeFunctionMatcher.js",
-};
+];
 
-static SKIP_TEST_CASES: Set<&'static str> = phf_set! {
-    // For some unknown reason these tests are unstable, so we'll skip them for now.
-    "language/identifiers/start-unicode"
-};
+static SKIP_TEST_CASES: &[&str] = &[
+    // node.js runtime error
+    "language/eval-code",
+    "language/expressions/dynamic-import",
+    "language/global-code/decl-func.js",
+    "language/module-code",
+    // formerly S11.13.2_A5.10_T5
+    "language/expressions/compound-assignment/compound-assignment-operator-calls-putvalue-lref--v",
+    "language/expressions/postfix-increment/operator-x-postfix-increment-calls-putvalue-lhs-newvalue",
+    "language/expressions/postfix-decrement/operator-x-postfix-decrement-calls-putvalue-lhs-newvalue",
+    "language/expressions/prefix-increment/operator-prefix-increment-x-calls-putvalue-lhs-newvalue",
+    "language/expressions/prefix-decrement/operator-prefix-decrement-x-calls-putvalue-lhs-newvalue",
+];
 
-const FIXTURES_PATH: &str = "tasks/coverage/test262/test";
+static SKIP_ESID: &[&str] = &[
+    // Always fail because they need to perform `eval`
+    "sec-performeval-rules-in-initializer",
+    "sec-privatefieldget",
+    "sec-privatefieldset",
+];
 
-pub struct CodegenRuntimeTest262Case {
+pub struct Test262RuntimeCase {
     base: Test262Case,
     test_root: PathBuf,
 }
 
-impl Case for CodegenRuntimeTest262Case {
+impl Case for Test262RuntimeCase {
     fn new(path: PathBuf, code: String) -> Self {
-        Self { base: Test262Case::new(path, code), test_root: project_root().join(FIXTURES_PATH) }
+        Self { base: Test262Case::new(path, code), test_root: workspace_root() }
     }
 
     fn code(&self) -> &str {
@@ -103,26 +107,32 @@ impl Case for CodegenRuntimeTest262Case {
     }
 
     fn skip_test_case(&self) -> bool {
-        let base_path = self.base.path().to_string_lossy();
+        let base_path = self.path().to_string_lossy();
+        let test262_path = base_path.trim_start_matches("test262/test/");
+        let includes = &self.base.meta().includes;
+        let features = &self.base.meta().features;
         self.base.should_fail()
-            || base_path.starts_with("built-ins")
-            || base_path.starts_with("staging")
-            || base_path.starts_with("intl402")
-            // skip v8 test-262 failed tests
-            || V8_TEST_262_FAILED_TESTS.iter().any(|test| base_path.contains(test))
-            || self
+            || self.base.skip_test_case()
+            || (self
                 .base
                 .meta()
-                .includes
-                .iter()
-                .any(|include| SKIP_EVALUATING_THESE_INCLUDES.contains(include))
-            || self
-                .base
-                .meta()
-                .features
-                .iter()
-                .any(|feature| SKIP_EVALUATING_FEATURES.contains(feature))
-            || SKIP_TEST_CASES.iter().any(|path| base_path.contains(path))
+                .esid
+                .as_ref()
+                .is_some_and(|esid| SKIP_ESID.contains(&esid.as_ref()))
+                && test262_path.contains("direct-eval"))
+            || base_path.contains("built-ins")
+            || base_path.contains("staging")
+            || base_path.contains("intl402")
+            || includes.iter().any(|include| SKIP_INCLUDES.contains(&include.as_ref()))
+            || features.iter().any(|feature| SKIP_FEATURES.contains(&feature.as_ref()))
+            || SKIP_TEST_CASES.iter().any(|path| test262_path.starts_with(path))
+            || get_v8_test262_failure_paths().iter().any(|path| {
+                if let Some(path) = path.strip_suffix('*') {
+                    test262_path.starts_with(path)
+                } else {
+                    test262_path.trim_end_matches(".js") == path
+                }
+            })
             || self.base.code().contains("$262")
             || self.base.code().contains("$DONOTEVALUATE()")
     }
@@ -130,46 +140,105 @@ impl Case for CodegenRuntimeTest262Case {
     fn run(&mut self) {}
 
     async fn run_async(&mut self) {
-        let result = async {
-            let codegen_source_text = {
-                let source_text = self.base.code();
-                let is_module = self.base.meta().flags.contains(&TestFlag::Module);
-                let is_only_strict = self.base.meta().flags.contains(&TestFlag::OnlyStrict);
-                let source_type = SourceType::default().with_module(is_module);
-                let allocator = Allocator::default();
-                let program = Parser::new(&allocator, source_text, source_type).parse().program;
-                let mut text = Codegen::<false>::new("", source_text, CodegenOptions::default())
-                    .build(&program)
-                    .source_text;
-                if is_only_strict {
-                    text = format!("\"use strict\";\n{text}");
-                }
-                if is_module {
-                    text = format!("{text}\n export {{}}");
-                }
-                text
-            };
+        let code = self.get_code(false, false);
+        let result = self.run_test_code("codegen", code).await;
 
-            self.run_test_code(codegen_source_text).await
+        if result != TestResult::Passed {
+            self.base.set_result(result);
+            return;
         }
-        .await;
+
+        let code = self.get_code(true, false);
+        let result = self.run_test_code("transform", code).await;
+
+        if result != TestResult::Passed {
+            self.base.set_result(result);
+            return;
+        }
+
+        // Minifier do not conform to annexB.
+        let base_path = self.path().to_string_lossy();
+        let test262_path = base_path.trim_start_matches("test262/test/");
+        if test262_path.starts_with("annexB") {
+            self.base.set_result(TestResult::Passed);
+            return;
+        }
+
+        // Unable to minify non-strict code, which may contain syntaxes that the minifier do not support (e.g. `with`).
+        if self.base.is_no_strict() {
+            self.base.set_result(TestResult::Passed);
+            return;
+        }
+
+        // None of the minifier conform to "fn-name-cover.js"
+        // `let xCover = (0, function() {});` xCover.name is ''
+        // `let xCover = function() {};` xCover.name is 'xCover'
+        // e.g. https://github.com/tc39/test262/blob/main/test/language/statements/let/fn-name-cover.js
+        if test262_path.ends_with("fn-name-cover.js") {
+            self.base.set_result(TestResult::Passed);
+            return;
+        }
+
+        let code = self.get_code(false, true);
+        let result = self.run_test_code("minify", code).await;
         self.base.set_result(result);
     }
 }
 
-impl CodegenRuntimeTest262Case {
-    async fn run_test_code(&self, codegen_text: String) -> TestResult {
-        let is_async = self.base.meta().flags.contains(&TestFlag::Async);
-        let is_module = self.base.meta().flags.contains(&TestFlag::Module);
-        let is_raw = self.base.meta().flags.contains(&TestFlag::Raw);
-        let import_dir = self
-            .test_root
-            .join(self.base.path().parent().expect("Failed to get parent directory"))
-            .to_string_lossy()
-            .to_string();
+impl Test262RuntimeCase {
+    fn get_code(&self, transform: bool, minify: bool) -> String {
+        let source_text = self.base.code();
+        let is_module = self.base.is_module();
+        let is_only_strict = self.base.is_only_strict();
+        let source_type = SourceType::cjs().with_module(is_module);
+        let allocator = Allocator::default();
+        let mut program = Parser::new(&allocator, source_text, source_type).parse().program;
+
+        if transform {
+            let (symbols, scopes) =
+                SemanticBuilder::new().build(&program).semantic.into_symbol_table_and_scope_tree();
+            let mut options = TransformOptions::enable_all();
+            options.jsx.refresh = None;
+            options.helper_loader.mode = HelperLoaderMode::External;
+            options.typescript.only_remove_type_imports = true;
+            Transformer::new(&allocator, self.path(), &options).build_with_symbols_and_scopes(
+                symbols,
+                scopes,
+                &mut program,
+            );
+        }
+
+        let symbol_table = if minify {
+            Minifier::new(MinifierOptions { mangle: None, ..MinifierOptions::default() })
+                .build(&allocator, &mut program)
+                .symbol_table
+        } else {
+            None
+        };
+
+        let mut text = CodeGenerator::new()
+            .with_options(CodegenOptions { minify, ..CodegenOptions::default() })
+            .with_symbol_table(symbol_table)
+            .build(&program)
+            .code;
+        if is_only_strict {
+            text = format!("\"use strict\";\n{text}");
+        }
+        if is_module {
+            text = format!("{text}\n export {{}}");
+        }
+        text
+    }
+
+    async fn run_test_code(&self, case: &'static str, code: String) -> TestResult {
+        let is_async = self.base.is_async();
+        let is_module = self.base.is_module();
+        let is_raw = self.base.is_raw();
+        let import_dir =
+            self.test_root.join(self.base.path().parent().unwrap()).to_string_lossy().to_string();
 
         let result = request_run_code(json!({
-            "code": codegen_text,
+            "code": code,
             "includes": self.base.meta().includes,
             "isAsync": is_async,
             "isModule": is_module,
@@ -190,10 +259,10 @@ impl CodegenRuntimeTest262Case {
                             return TestResult::Passed;
                         }
                     }
-                    TestResult::RuntimeError(output)
+                    TestResult::GenericError(case, output)
                 }
             }
-            Err(error) => TestResult::RuntimeError(error),
+            Err(error) => TestResult::GenericError(case, error),
         }
     }
 }
@@ -202,10 +271,9 @@ async fn request_run_code(json: impl serde::Serialize + Send + 'static) -> Resul
     tokio::spawn(async move {
         agent()
             .post("http://localhost:32055/run")
-            .timeout(Duration::from_secs(10))
             .send_json(json)
             .map_err(|err| err.to_string())
-            .and_then(|res| res.into_string().map_err(|err| err.to_string()))
+            .and_then(|mut res| res.body_mut().read_to_string().map_err(|err| err.to_string()))
     })
     .await
     .map_err(|err| err.to_string())?

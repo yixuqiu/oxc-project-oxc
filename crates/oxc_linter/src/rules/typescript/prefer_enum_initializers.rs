@@ -1,17 +1,25 @@
 use oxc_ast::{ast::TSEnumMemberName, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+    AstNode,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("typescript-eslint(prefer-enum-initializers):The value of the member {0:?} should be explicitly defined.")]
-#[diagnostic(severity(warning), help("Can be fixed to {0:?} = {1:?}."))]
-struct PreferEnumInitializersDiagnostic(CompactStr, usize, #[label] pub Span);
+fn prefer_enum_initializers_diagnostic(
+    member_name: &str,
+    init: usize,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "The value of the member {member_name:?} should be explicitly defined."
+    ))
+    .with_help(format!("Can be fixed to {member_name:?} = {init:?}."))
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferEnumInitializers;
@@ -32,24 +40,32 @@ declare_oxc_lint!(
     /// }
     /// ```
     PreferEnumInitializers,
-    pedantic
+    typescript,
+    pedantic,
+    pending
 );
 
 impl Rule for PreferEnumInitializers {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::TSEnumDeclaration(decl) = node.kind() else { return };
+        let AstKind::TSEnumDeclaration(decl) = node.kind() else {
+            return;
+        };
 
         for (index, member) in decl.members.iter().enumerate() {
             if member.initializer.is_none() {
-                if let TSEnumMemberName::StaticIdentifier(i) = &member.id {
-                    ctx.diagnostic(PreferEnumInitializersDiagnostic(
-                        i.name.to_compact_str(),
+                if let TSEnumMemberName::Identifier(i) = &member.id {
+                    ctx.diagnostic(prefer_enum_initializers_diagnostic(
+                        i.name.as_str(),
                         index + 1,
                         member.span,
                     ));
                 }
             }
         }
+    }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
     }
 }
 
@@ -106,5 +122,6 @@ fn test() {
 			      ",
     ];
 
-    Tester::new(PreferEnumInitializers::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferEnumInitializers::NAME, PreferEnumInitializers::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

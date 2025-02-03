@@ -1,16 +1,17 @@
 [package]
-name                   = "oxc_span"
-version                = "0.12.5"
-publish                = true
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc_span"
+version = "0.48.2"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/src"]
+keywords.workspace = true
+license.workspace = true
+publish = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
 
 [lints]
 workspace = true
@@ -19,13 +20,17 @@ workspace = true
 doctest = false
 
 [dependencies]
-miette      = { workspace = true }
-compact_str = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast_macros = { workspace = true }
+oxc_estree = { workspace = true }
 
-tsify        = { workspace = true, optional = true }
-wasm-bindgen = { workspace = true, optional = true }
-serde        = { workspace = true, features = ["derive"], optional = true }
+compact_str = { workspace = true }
+miette = { workspace = true }
+
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
 
 [features]
-default   = []
-serialize = ["dep:serde", "dep:tsify", "dep:wasm-bindgen", "compact_str/serde"]
+default = []
+serialize = ["compact_str/serde", "dep:serde", "oxc_estree/serialize"]
+schemars = ["dep:schemars"]

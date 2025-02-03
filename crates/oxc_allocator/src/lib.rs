@@ -1,52 +1,34 @@
-use std::{
-    convert::From,
-    ops::{Deref, DerefMut},
-};
+//! # ⚓ Oxc Memory Allocator
+//!
+//! Oxc uses a bump-based memory arena for faster AST allocations.
+//!
+//! This crate contains an [`Allocator`] for creating such arenas, as well as ports of data types
+//! from `std` adapted to use this arena:
+//!
+//! * [`Box`]
+//! * [`Vec`]
+//! * [`String`]
+//! * [`HashMap`]
+//!
+//! See [`Allocator`] docs for information on efficient use of [`Allocator`].
 
-mod arena;
+#![warn(missing_docs)]
 
-pub use arena::{Box, String, Vec};
-use bumpalo::Bump;
+mod address;
+mod allocator;
+mod allocator_api2;
+mod boxed;
+mod clone_in;
+mod convert;
+pub mod hash_map;
+pub mod string;
+mod vec;
 
-#[derive(Default)]
-pub struct Allocator {
-    bump: Bump,
-}
-
-impl From<Bump> for Allocator {
-    fn from(bump: Bump) -> Self {
-        Self { bump }
-    }
-}
-
-impl Deref for Allocator {
-    type Target = Bump;
-
-    fn deref(&self) -> &Self::Target {
-        &self.bump
-    }
-}
-
-impl DerefMut for Allocator {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.bump
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::ops::Deref;
-
-    use crate::Allocator;
-    use bumpalo::Bump;
-
-    #[test]
-    fn test_api() {
-        let bump = Bump::new();
-        let allocator: Allocator = bump.into();
-        #[allow(clippy::explicit_deref_methods)]
-        {
-            _ = allocator.deref();
-        }
-    }
-}
+pub use address::{Address, GetAddress};
+pub use allocator::Allocator;
+pub use boxed::Box;
+pub use clone_in::CloneIn;
+pub use convert::{FromIn, IntoIn};
+pub use hash_map::HashMap;
+pub use string::String;
+pub use vec::Vec;

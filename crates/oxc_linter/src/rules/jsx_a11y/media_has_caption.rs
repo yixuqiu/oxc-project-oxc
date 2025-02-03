@@ -1,40 +1,38 @@
+use std::borrow::Cow;
+
 use oxc_ast::{
     ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
+use serde_json::Value;
 
 use crate::{context::LintContext, rule::Rule, utils::get_element_type, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsx-a11y(media-has-caption): Missing <track> element with captions inside <audio> or <video> element")]
-#[diagnostic(
-    severity(warning),
-    help("Media elements such as <audio> and <video> must have a <track> for captions.")
-)]
-struct MediaHasCaptionDiagnostic(#[label] pub Span);
+fn media_has_caption_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Missing <track> element with captions inside <audio> or <video> element")
+        .with_help("Media elements such as <audio> and <video> must have a <track> for captions.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct MediaHasCaption(Box<MediaHasCaptionConfig>);
 
 #[derive(Debug, Clone)]
 pub struct MediaHasCaptionConfig {
-    audio: Vec<String>,
-    video: Vec<String>,
-    track: Vec<String>,
+    audio: Vec<Cow<'static, str>>,
+    video: Vec<Cow<'static, str>>,
+    track: Vec<Cow<'static, str>>,
 }
 
 impl Default for MediaHasCaptionConfig {
     fn default() -> Self {
         Self {
-            audio: vec!["audio".to_string()],
-            video: vec!["video".to_string()],
-            track: vec!["track".to_string()],
+            audio: vec![Cow::Borrowed("audio")],
+            video: vec![Cow::Borrowed("video")],
+            track: vec![Cow::Borrowed("track")],
         }
     }
 }
@@ -49,40 +47,56 @@ declare_oxc_lint!(
     /// Captions are also useful for users in noisy environments or where audio is not available.
     ///
     /// ### Example
-    /// ```jsx
-    /// // Good
-    /// <audio><track kind="captions" src="caption_file.vtt" /></audio>
-    /// <video><track kind="captions" src="caption_file.vtt" /></video>
     ///
-    /// // Bad
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <audio></audio>
     /// <video></video>
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
+    /// <audio><track kind="captions" src="caption_file.vtt" /></audio>
+    /// <video><track kind="captions" src="caption_file.vtt" /></video>
+    /// ```
     MediaHasCaption,
+    jsx_a11y,
     correctness
 );
 
 impl Rule for MediaHasCaption {
-    fn from_configuration(value: serde_json::Value) -> Self {
+    fn from_configuration(value: Value) -> Self {
         let mut config = MediaHasCaptionConfig::default();
 
         if let Some(arr) = value.as_array() {
             for v in arr {
                 if let serde_json::Value::Object(rule_config) = v {
-                    if let Some(audio) = rule_config.get("audio").and_then(|v| v.as_array()) {
-                        config
-                            .audio
-                            .extend(audio.iter().filter_map(|v| v.as_str().map(String::from)));
+                    if let Some(audio) = rule_config.get("audio").and_then(Value::as_array) {
+                        config.audio.extend(
+                            audio
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(String::from)
+                                .map(Into::into),
+                        );
                     }
-                    if let Some(video) = rule_config.get("video").and_then(|v| v.as_array()) {
-                        config
-                            .video
-                            .extend(video.iter().filter_map(|v| v.as_str().map(String::from)));
+                    if let Some(video) = rule_config.get("video").and_then(Value::as_array) {
+                        config.video.extend(
+                            video
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(String::from)
+                                .map(Into::into),
+                        );
                     }
-                    if let Some(track) = rule_config.get("track").and_then(|v| v.as_array()) {
-                        config
-                            .track
-                            .extend(track.iter().filter_map(|v| v.as_str().map(String::from)));
+                    if let Some(track) = rule_config.get("track").and_then(Value::as_array) {
+                        config.track.extend(
+                            track
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(String::from)
+                                .map(Into::into),
+                        );
                     }
                     break;
                 }
@@ -91,12 +105,13 @@ impl Rule for MediaHasCaption {
 
         Self(Box::new(config))
     }
-    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::JSXOpeningElement(jsx_el) = node.kind() else { return };
 
-        let Some(element_name) = get_element_type(ctx, jsx_el) else {
+    fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
+        let AstKind::JSXOpeningElement(jsx_el) = node.kind() else {
             return;
         };
+
+        let element_name = get_element_type(ctx, jsx_el);
 
         let is_audio_or_video =
             self.0.audio.contains(&element_name) || self.0.video.contains(&element_name);
@@ -137,21 +152,20 @@ impl Rule for MediaHasCaption {
         };
 
         let has_caption = if parent.children.is_empty() {
-            ctx.diagnostic(MediaHasCaptionDiagnostic(parent.opening_element.span));
+            ctx.diagnostic(media_has_caption_diagnostic(parent.opening_element.span));
             false
         } else {
             parent.children.iter().any(|child| match child {
                 JSXChild::Element(child_el) => {
-                    let Some(child_name) = get_element_type(ctx, &child_el.opening_element) else {
-                        return false;
-                    };
+                    let child_name = get_element_type(ctx, &child_el.opening_element);
+
                     self.0.track.contains(&child_name)
                         && child_el.opening_element.attributes.iter().any(|attr| {
                             if let JSXAttributeItem::Attribute(attr) = attr {
                                 if let JSXAttributeName::Identifier(iden) = &attr.name {
                                     if let Some(JSXAttributeValue::StringLiteral(s)) = &attr.value {
                                         return iden.name == "kind"
-                                            && s.value.to_lowercase() == "captions";
+                                            && s.value.eq_ignore_ascii_case("captions");
                                     }
                                 }
                             }
@@ -165,7 +179,7 @@ impl Rule for MediaHasCaption {
         let span = parent.span;
 
         if !has_caption {
-            ctx.diagnostic(MediaHasCaptionDiagnostic(span));
+            ctx.diagnostic(media_has_caption_diagnostic(span));
         }
     }
 }
@@ -256,5 +270,5 @@ fn test() {
         (r"<Box as='audio'><Track kind='subtitles' /></Box>", None, Some(settings()), None),
     ];
 
-    Tester::new(MediaHasCaption::NAME, pass, fail).test_and_snapshot();
+    Tester::new(MediaHasCaption::NAME, MediaHasCaption::PLUGIN, pass, fail).test_and_snapshot();
 }

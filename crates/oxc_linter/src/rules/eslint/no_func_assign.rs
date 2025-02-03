@@ -1,18 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-func-assign): '{0}' is a function.")]
-#[diagnostic(severity(warning))]
-struct NoFuncAssignDiagnostic(CompactStr, #[label("{0} is re-assigned here")] pub Span);
+fn no_func_assign_diagnostic(name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("'{name}' is a function."))
+        .with_label(span.label(format!("{name} is re-assigned here")))
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoFuncAssign;
@@ -31,6 +28,7 @@ declare_oxc_lint!(
     /// foo = bar;
     /// ```
     NoFuncAssign,
+    eslint,
     correctness
 );
 
@@ -41,9 +39,9 @@ impl Rule for NoFuncAssign {
         if let AstKind::Function(_) = ctx.nodes().kind(decl) {
             for reference in symbol_table.get_resolved_references(symbol_id) {
                 if reference.is_write() {
-                    ctx.diagnostic(NoFuncAssignDiagnostic(
-                        symbol_table.get_name(symbol_id).into(),
-                        reference.span(),
+                    ctx.diagnostic(no_func_assign_diagnostic(
+                        symbol_table.get_name(symbol_id),
+                        ctx.semantic().reference_span(reference),
                     ));
                 }
             }
@@ -76,5 +74,5 @@ fn test() {
         ("var a = function foo() { foo = 123; };", None),
     ];
 
-    Tester::new(NoFuncAssign::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoFuncAssign::NAME, NoFuncAssign::PLUGIN, pass, fail).test_and_snapshot();
 }

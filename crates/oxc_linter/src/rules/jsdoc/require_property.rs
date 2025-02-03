@@ -1,7 +1,4 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -11,47 +8,54 @@ use crate::{
     utils::{should_ignore_as_internal, should_ignore_as_private},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsdoc(require-property): The `@typedef` and `@namespace` tags must include a `@property` tag with the type Object.")]
-#[diagnostic(
-    severity(warning),
-    help("Consider adding a `@property` tag or replacing it with a more specific type.")
-)]
-
-struct RequirePropertyDiagnostic(#[label] pub Span);
+fn require_property_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "The `@typedef` and `@namespace` tags must include a `@property` tag with the type Object.",
+    )
+    .with_help("Consider adding a `@property` tag or replacing it with a more specific type.")
+    .and_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireProperty;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Requires that all `@typedef` and `@namespace` tags have `@property` tags
     /// when their type is a plain `object`, `Object`, or `PlainObject`.
     ///
     /// ### Why is this bad?
+    ///
     /// Object type should have properties defined.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Passing
     /// /**
     ///  * @typedef {Object} SomeTypedef
-    ///  * @property {SomeType} propName Prop description
-    ///  */
-    /// /**
-    ///  * @typedef {object} Foo
-    ///  * @property someProp
     ///  */
     ///
-    /// // Failing
-    /// /**
-    ///  * @typedef {Object} SomeTypedef
-    ///  */
     /// /**
     ///  * @namespace {Object} SomeNamesoace
     ///  */
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /**
+    ///  * @typedef {Object} SomeTypedef
+    ///  * @property {SomeType} propName Prop description
+    ///  */
+    ///
+    /// /**
+    ///  * @typedef {object} Foo
+    ///  * @property someProp
+    ///  */
+    /// ```
     RequireProperty,
+    jsdoc,
     correctness
 );
 
@@ -79,7 +83,7 @@ impl Rule for RequireProperty {
                     // - This JSDoc has multiple `@typedef` or `@namespace` tags
                     // - And previous `@typedef` or `@namespace` tag did not have `@property` tag
                     if let Some(span) = should_report {
-                        ctx.diagnostic(RequirePropertyDiagnostic(span));
+                        ctx.diagnostic(require_property_diagnostic(span));
                     }
 
                     let (Some(type_part), _, _) = tag.type_name_comment() else {
@@ -88,7 +92,7 @@ impl Rule for RequireProperty {
 
                     let r#type = type_part.parsed();
                     if r#type == "Object" || r#type == "object" || r#type == "PlainObject" {
-                        should_report = Some(tag.kind.span.merge(&type_part.span));
+                        should_report = Some(tag.kind.span.merge(type_part.span));
                     }
                 }
 
@@ -99,7 +103,7 @@ impl Rule for RequireProperty {
             }
 
             if let Some(span) = should_report {
-                ctx.diagnostic(RequirePropertyDiagnostic(span));
+                ctx.diagnostic(require_property_diagnostic(span));
             }
         }
     }
@@ -280,5 +284,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(RequireProperty::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequireProperty::NAME, RequireProperty::PLUGIN, pass, fail).test_and_snapshot();
 }

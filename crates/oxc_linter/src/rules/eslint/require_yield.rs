@@ -1,17 +1,13 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(require-yield): This generator function does not have 'yield'")]
-#[diagnostic(severity(warning))]
-struct RequireYieldDiagnostic(#[label] pub Span);
+fn require_yield_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("This generator function does not have 'yield'").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequireYield;
@@ -32,6 +28,7 @@ declare_oxc_lint!(
     /// }
     /// ```
     RequireYield,
+    eslint,
     correctness
 );
 
@@ -43,7 +40,7 @@ impl Rule for RequireYield {
                 && func.body.as_ref().is_some_and(|body| !body.statements.is_empty())
             {
                 let span = func.id.as_ref().map_or_else(|| func.span, |ident| ident.span);
-                ctx.diagnostic(RequireYieldDiagnostic(span));
+                ctx.diagnostic(require_yield_diagnostic(span));
             }
         }
     }
@@ -76,5 +73,5 @@ fn test() {
         "function* foo() { function* bar() { return 0; } yield 0; }",
     ];
 
-    Tester::new(RequireYield::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequireYield::NAME, RequireYield::PLUGIN, pass, fail).test_and_snapshot();
 }

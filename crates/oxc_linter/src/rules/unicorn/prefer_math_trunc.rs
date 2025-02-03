@@ -1,18 +1,15 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator, UnaryOperator};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-math-trunc): Prefer `Math.trunc()` over instead of `{1} 0`.")]
-#[diagnostic(severity(warning))]
-struct PreferMathTruncDiagnostic(#[label] pub Span, pub &'static str);
+fn prefer_math_trunc_diagnostic(span: Span, bad_op: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer `Math.trunc()` over instead of `{bad_op} 0`."))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferMathTrunc;
@@ -34,15 +31,20 @@ declare_oxc_lint!(
     /// Using bitwise operations to truncate numbers is not clear and do not work in [some cases](https://stackoverflow.com/a/34706108/11687747).
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// const foo = 1.1 | 0;
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// const foo = 1.1 | 0;
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const foo = Math.trunc(1.1);
     /// ```
     PreferMathTrunc,
-    pedantic
+    unicorn,
+    pedantic,
+    pending
 );
 
 impl Rule for PreferMathTrunc {
@@ -116,7 +118,7 @@ impl Rule for PreferMathTrunc {
             }
         };
 
-        ctx.diagnostic(PreferMathTruncDiagnostic(node.kind().span(), operator));
+        ctx.diagnostic(prefer_math_trunc_diagnostic(node.kind().span(), operator));
     }
 }
 
@@ -179,5 +181,5 @@ fn test() {
         r"const foo = ~~~~((bar | 0 | 0) >> 0 >> 0 << 0 << 0 ^ 0 ^0);",
     ];
 
-    Tester::new(PreferMathTrunc::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferMathTrunc::NAME, PreferMathTrunc::PLUGIN, pass, fail).test_and_snapshot();
 }

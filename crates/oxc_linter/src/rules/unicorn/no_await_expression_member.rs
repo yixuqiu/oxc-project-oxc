@@ -1,17 +1,15 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-await-expression-member): Disallow member access from await expression")]
-#[diagnostic(severity(warning), help("When accessing a member from an await expression, the await expression has to be parenthesized, which is not readable."))]
-struct NoAwaitExpressionMemberDiagnostic(#[label] pub Span);
+fn no_await_expression_member_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not access a member directly from an await expression.")
+        .with_help("Assign the result of the await expression to a variable, then access the member from that variable.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoAwaitExpressionMember;
@@ -19,28 +17,34 @@ pub struct NoAwaitExpressionMember;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// This rule disallows member access from await expression
+    /// Disallows member access from `await` expressions.
     ///
     /// ### Why is this bad?
     ///
-    /// When accessing a member from an await expression,
-    /// the await expression has to be parenthesized, which is not readable.
+    /// When accessing a member from an `await` expression,
+    /// the `await` expression has to be parenthesized, which is not readable.
     ///
     /// ### Example
     /// ```javascript
-    /// // Bad
-    /// const secondElement = (await getArray())[1];
+    /// async function bad() {
+    ///     const secondElement = (await getArray())[1];
+    /// }
     ///
-    /// // Good
-    /// const [, secondElement] = await getArray();
+    /// async function good() {
+    ///     const [, secondElement] = await getArray();
+    /// }
     /// ```
     NoAwaitExpressionMember,
-    style
+    unicorn,
+    style,
+    pending
 );
 
 impl Rule for NoAwaitExpressionMember {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::MemberExpression(member_expr) = node.kind() else { return };
+        let AstKind::MemberExpression(member_expr) = node.kind() else {
+            return;
+        };
 
         let Expression::ParenthesizedExpression(paren_expr) = member_expr.object() else {
             return;
@@ -48,7 +52,7 @@ impl Rule for NoAwaitExpressionMember {
 
         if matches!(paren_expr.expression, Expression::AwaitExpression(_)) {
             let node_span = member_expr.span();
-            ctx.diagnostic(NoAwaitExpressionMemberDiagnostic(node_span));
+            ctx.diagnostic(no_await_expression_member_diagnostic(node_span));
         }
     }
 }
@@ -100,5 +104,6 @@ fn test() {
         (r"const foo: Type | A = (await promise).foo", None),
     ];
 
-    Tester::new(NoAwaitExpressionMember::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoAwaitExpressionMember::NAME, NoAwaitExpressionMember::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

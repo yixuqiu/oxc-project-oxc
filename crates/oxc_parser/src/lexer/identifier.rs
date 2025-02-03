@@ -1,16 +1,17 @@
-use super::{
-    cold_branch,
-    search::{byte_search, safe_byte_match_table, SafeByteMatchTable},
-    Kind, Lexer, SourcePosition,
-};
-use crate::diagnostics;
-
 use std::cmp::max;
 
 use oxc_allocator::String;
 use oxc_span::Span;
 use oxc_syntax::identifier::{
     is_identifier_part, is_identifier_part_unicode, is_identifier_start_unicode,
+};
+
+use crate::diagnostics;
+
+use super::{
+    cold_branch,
+    search::{byte_search, safe_byte_match_table, SafeByteMatchTable},
+    Kind, Lexer, SourcePosition,
 };
 
 const MIN_ESCAPED_STR_LEN: usize = 16;
@@ -47,7 +48,7 @@ impl<'a> Lexer<'a> {
     /// # SAFETY
     /// * `self.source` must not be exhausted (at least 1 char remaining).
     /// * Next char must be ASCII.
-    #[allow(clippy::missing_safety_doc)] // Clippy is wrong!
+    #[expect(clippy::unnecessary_safety_comment)]
     pub(super) unsafe fn identifier_name_handler(&mut self) -> &'a str {
         // Advance past 1st byte.
         // SAFETY: Caller guarantees not at EOF, and next byte is ASCII.
@@ -97,8 +98,8 @@ impl<'a> Lexer<'a> {
     /// Handle rest of identifier after first byte of a multi-byte Unicode char found.
     /// Any number of characters can have already been consumed from `self.source` prior to it.
     /// `self.source` should be positioned at start of Unicode character.
-    fn identifier_tail_unicode(&mut self, start_pos: SourcePosition) -> &'a str {
-        let c = self.peek().unwrap();
+    fn identifier_tail_unicode(&mut self, start_pos: SourcePosition<'a>) -> &'a str {
+        let c = self.peek_char().unwrap();
         if is_identifier_part_unicode(c) {
             self.consume_char();
             self.identifier_tail_after_unicode(start_pos)
@@ -112,10 +113,13 @@ impl<'a> Lexer<'a> {
     ///
     /// First char should have been consumed from `self.source` prior to calling this.
     /// `start_pos` should be position of the start of the identifier (before first char was consumed).
-    pub(super) fn identifier_tail_after_unicode(&mut self, start_pos: SourcePosition) -> &'a str {
+    pub(super) fn identifier_tail_after_unicode(
+        &mut self,
+        start_pos: SourcePosition<'a>,
+    ) -> &'a str {
         // Identifier contains a Unicode chars, so probably contains more.
         // So just iterate over chars now, instead of bytes.
-        while let Some(c) = self.peek() {
+        while let Some(c) = self.peek_char() {
             if is_identifier_part(c) {
                 self.consume_char();
             } else if c == '\\' {
@@ -145,7 +149,7 @@ impl<'a> Lexer<'a> {
     ///
     /// The `\` must not have be consumed from `lexer.source`.
     /// `start_pos` must be position of start of identifier.
-    fn identifier_backslash(&mut self, start_pos: SourcePosition, is_start: bool) -> &'a str {
+    fn identifier_backslash(&mut self, start_pos: SourcePosition<'a>, is_start: bool) -> &'a str {
         // Create arena string to hold unescaped identifier.
         // We don't know how long identifier will end up being. Take a guess that total length
         // will be double what we've seen so far, or `MIN_ESCAPED_STR_LEN` minimum.
@@ -177,7 +181,7 @@ impl<'a> Lexer<'a> {
             // Consume chars until reach end of identifier or another escape
             let chunk_start = self.source.position();
             loop {
-                let maybe_char = self.peek();
+                let maybe_char = self.peek_char();
                 if maybe_char.is_some_and(is_identifier_part) {
                     self.consume_char();
                     continue;
@@ -216,7 +220,7 @@ impl<'a> Lexer<'a> {
         if start_pos.addr() == self.source.end_addr() {
             return cold_branch(|| {
                 let start = self.offset();
-                self.error(diagnostics::UnexpectedEnd(Span::new(start, start)));
+                self.error(diagnostics::unexpected_end(Span::new(start, start)));
                 Kind::Undetermined
             });
         }
@@ -270,9 +274,9 @@ impl<'a> Lexer<'a> {
     /// Handle private identifier whose first byte is not an ASCII identifier start byte.
     #[cold]
     fn private_identifier_not_ascii_id(&mut self) -> Kind {
-        let b = self.source.peek_byte().unwrap();
+        let b = self.peek_byte().unwrap();
         if !b.is_ascii() {
-            let c = self.peek().unwrap();
+            let c = self.peek_char().unwrap();
             if is_identifier_start_unicode(c) {
                 let start_pos = self.source.position();
                 self.consume_char();
@@ -290,7 +294,7 @@ impl<'a> Lexer<'a> {
         // No identifier found
         let start = self.offset();
         let c = self.consume_char();
-        self.error(diagnostics::InvalidCharacter(c, Span::new(start, self.offset())));
+        self.error(diagnostics::invalid_character(c, Span::new(start, self.offset())));
         Kind::Undetermined
     }
 }

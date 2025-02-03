@@ -2,24 +2,20 @@ use oxc_ast::{
     ast::{Argument, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-unicorn(no-invalid-remove-event-listener): Invalid `removeEventListener` call."
-)]
-#[diagnostic(severity(warning), help("The listener argument should be a function reference."))]
-struct NoInvalidRemoveEventListenerDiagnostic(
-    #[label("`removeEventListener` called here.")] pub Span,
-    #[label("Invalid argument here")] pub Span,
-);
+fn no_invalid_remove_event_listener_diagnostic(call_span: Span, arg_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Invalid `removeEventListener` call.")
+        .with_help("The listener argument should be a function reference.")
+        .with_labels([
+            call_span.label("`removeEventListener` called here."),
+            arg_span.label("Invalid argument here"),
+        ])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoInvalidRemoveEventListener;
@@ -34,28 +30,36 @@ declare_oxc_lint!(
     /// The [`removeEventListener`](https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/removeEventListener) function must be called with a reference to the same function that was passed to [`addEventListener`](https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener). Calling `removeEventListener` with an inline function or the result of an inline `.bind()` call is indicative of an error, and won't actually remove the listener.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// el.removeEventListener('click', () => {});
     /// el.removeEventListener('click', function () {});
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// el.removeEventListener('click', handler);
     /// el.removeEventListener('click', handler.bind(this));
     /// ```
     NoInvalidRemoveEventListener,
+    unicorn,
     correctness
 );
 
 impl Rule for NoInvalidRemoveEventListener {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
         if call_expr.optional {
             return;
         }
 
-        let Some(member_expr) = call_expr.callee.get_member_expr() else { return };
+        let Some(member_expr) = call_expr.callee.get_member_expr() else {
+            return;
+        };
 
         let remove_event_listener_ident_span = match member_expr {
             MemberExpression::StaticMemberExpression(v) => {
@@ -75,7 +79,9 @@ impl Rule for NoInvalidRemoveEventListener {
             return;
         }
 
-        let Some(listener) = call_expr.arguments.get(1) else { return };
+        let Some(listener) = call_expr.arguments.get(1) else {
+            return;
+        };
 
         if !matches!(
             listener,
@@ -115,7 +121,7 @@ impl Rule for NoInvalidRemoveEventListener {
             listener_span
         };
 
-        ctx.diagnostic(NoInvalidRemoveEventListenerDiagnostic(
+        ctx.diagnostic(no_invalid_remove_event_listener_diagnostic(
             remove_event_listener_ident_span,
             listener_span,
         ));
@@ -170,12 +176,12 @@ fn test() {
         element.removeEventListener("glider-refresh", event => {
             // $ExpectType GliderEvent<undefined>
             event;
-        
+
             // $ExpectType boolean
             event.bubbles;
-        
+
             event.target;
-        
+
             if (event.target) {
                 // $ExpectType Glider<HTMLElement> | undefined
                 event.target._glider;
@@ -186,12 +192,12 @@ fn test() {
         element.removeEventListener("glider-refresh", function (event) {
             // $ExpectType GliderEvent<undefined>
             event;
-        
+
             // $ExpectType boolean
             event.bubbles;
-        
+
             event.target;
-        
+
             if (event.target) {
                 // $ExpectType Glider<HTMLElement> | undefined
                 event.target._glider;
@@ -200,5 +206,11 @@ fn test() {
         "#,
     ];
 
-    Tester::new(NoInvalidRemoveEventListener::NAME, pass, fail).test_and_snapshot();
+    Tester::new(
+        NoInvalidRemoveEventListener::NAME,
+        NoInvalidRemoveEventListener::PLUGIN,
+        pass,
+        fail,
+    )
+    .test_and_snapshot();
 }

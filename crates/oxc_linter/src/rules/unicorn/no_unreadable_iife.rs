@@ -2,41 +2,41 @@ use oxc_ast::{
     ast::{Expression, Statement},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-unreadable-iife): IIFE with parenthesized arrow function body is considered unreadable.")]
-#[diagnostic(
-    severity(warning),
-    help("Rewrite the IIFE to avoid having a parenthesized arrow function body.")
-)]
-struct NoUnreadableIifeDiagnostic(#[label] pub Span);
+fn no_unreadable_iife_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("IIFE with parenthesized arrow function body is considered unreadable.")
+        .with_help("Rewrite the IIFE to avoid having a parenthesized arrow function body.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnreadableIife;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// This rule disallows IIFEs with a parenthesized arrow function body.
     ///
     /// ### Why is this bad?
+    ///
     /// IIFEs with a parenthesized arrow function body are unreadable.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Fail
     /// const foo = (bar => (bar ? bar.baz : baz))(getBar());
     ///
     /// const foo = ((bar, baz) => ({bar, baz}))(bar, baz);
+    /// ```
     ///
-    /// // Pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const bar = getBar();
     /// const foo = bar ? bar.baz : baz;
     ///
@@ -48,15 +48,18 @@ declare_oxc_lint!(
     /// })(getBar());
     /// ```
     NoUnreadableIife,
+    unicorn,
     pedantic
 );
 
 impl Rule for NoUnreadableIife {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
         let Expression::ArrowFunctionExpression(arrow_expr) =
-            &call_expr.callee.without_parenthesized()
+            &call_expr.callee.without_parentheses()
         else {
             return;
         };
@@ -68,7 +71,7 @@ impl Rule for NoUnreadableIife {
             return;
         };
         if matches!(expr_stmt.expression, Expression::ParenthesizedExpression(_)) {
-            ctx.diagnostic(NoUnreadableIifeDiagnostic(expr_stmt.span));
+            ctx.diagnostic(no_unreadable_iife_diagnostic(expr_stmt.span));
         }
     }
 }
@@ -124,5 +127,5 @@ fn test() {
         "(async () => (( {bar} )))();",
     ];
 
-    Tester::new(NoUnreadableIife::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnreadableIife::NAME, NoUnreadableIife::PLUGIN, pass, fail).test_and_snapshot();
 }

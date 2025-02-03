@@ -2,27 +2,20 @@ use oxc_ast::{
     ast::{match_member_expression, CallExpression, Expression, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{
     context::LintContext,
-    fixer::Fix,
+    fixer::RuleFixer,
     rule::Rule,
-    utils::{
-        collect_possible_jest_call_node, is_equality_matcher, parse_expect_jest_fn_call,
-        ParsedExpectFnCall, PossibleJestNode,
-    },
+    utils::{is_equality_matcher, parse_expect_jest_fn_call, ParsedExpectFnCall, PossibleJestNode},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jest(prefer-to-have-length): Suggest using `toHaveLength()`.")]
-#[diagnostic(severity(warning))]
-struct UseToHaveLength(#[label] pub Span);
+fn use_to_have_length(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using `toHaveLength()`.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferToHaveLength;
@@ -54,14 +47,18 @@ declare_oxc_lint!(
     /// ```
     ///
     PreferToHaveLength,
+    jest,
     style,
+    fix
 );
 
 impl Rule for PreferToHaveLength {
-    fn run_once(&self, ctx: &LintContext) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -141,51 +138,51 @@ impl PreferToHaveLength {
         let Some(matcher) = parsed_expect_call.matcher() else {
             return;
         };
-
         if expect_property_name != "length" || !is_equality_matcher(matcher) {
             return;
         }
 
-        ctx.diagnostic_with_fix(UseToHaveLength(matcher.span), || {
-            let code = Self::build_code(static_mem_expr, kind, property_name, ctx);
-            let end = if call_expr.arguments.len() > 0 {
-                call_expr.arguments.first().unwrap().span().start
-            } else {
-                matcher.span.end
-            };
-            Fix::new(code, Span::new(call_expr.span.start, end - 1))
+        ctx.diagnostic_with_fix(use_to_have_length(matcher.span), |fixer| {
+            let code = Self::build_code(fixer, static_mem_expr, kind, property_name);
+            let offset = u32::try_from(
+                fixer
+                    .source_range(Span::new(matcher.span.end, call_expr.span().end))
+                    .find('(')
+                    .unwrap(),
+            )
+            .unwrap();
+            fixer.replace(Span::new(call_expr.span.start, matcher.span.end + offset), code)
         });
     }
 
-    fn build_code(
-        mem_expr: &MemberExpression,
+    fn build_code<'a>(
+        fixer: RuleFixer<'_, 'a>,
+        mem_expr: &MemberExpression<'a>,
         kind: Option<&str>,
         property_name: Option<&str>,
-        ctx: &LintContext<'_>,
     ) -> String {
-        let mut formatter = ctx.codegen();
-        let Expression::Identifier(prop_ident) = mem_expr.object() else {
-            return formatter.into_source_text();
-        };
+        let mut formatter = fixer.codegen();
 
-        formatter.print_str(b"expect(");
-        formatter.print_str(prop_ident.name.as_bytes());
-        formatter.print_str(b")");
+        formatter.print_str("expect(");
+        formatter.print_str(
+            fixer.source_range(Span::new(mem_expr.span().start, mem_expr.object().span().end)),
+        );
+        formatter.print_str(")");
 
         if let Some(kind_val) = kind {
             if kind_val == "ComputedMember" {
                 let property = property_name.unwrap();
-                formatter.print_str(b"[\"");
-                formatter.print_str(property.as_bytes());
-                formatter.print_str(b"\"]");
+                formatter.print_str("[\"");
+                formatter.print_str(property);
+                formatter.print_str("\"]");
             } else if kind_val == "StaticMember" {
-                formatter.print_str(b".");
+                formatter.print_str(".");
                 let property = property_name.unwrap();
-                formatter.print_str(property.as_bytes());
+                formatter.print_str(property);
             }
         }
 
-        formatter.print_str(b".toHaveLength");
+        formatter.print_str(".toHaveLength");
         formatter.into_source_text()
     }
 }
@@ -193,6 +190,8 @@ impl PreferToHaveLength {
 #[test]
 fn tests() {
     use crate::tester::Tester;
+
+    // Note: Both Jest and Vitest share the same unit tests
 
     let pass = vec![
         ("expect.hasAssertions", None),
@@ -205,6 +204,7 @@ fn tests() {
         ("expect(user.getUserName(5)).resolves.toEqual('Paul')", None),
         ("expect(user.getUserName(5)).rejects.toEqual('Paul')", None),
         ("expect(a);", None),
+        ("expect().toBe();", None),
     ];
 
     let fail = vec![
@@ -218,10 +218,21 @@ fn tests() {
         ("expect(files.length).toEqual(1);", None),
         ("expect(files.length).toStrictEqual(1);", None),
         ("expect(files.length).not.toStrictEqual(1);", None),
+        (
+            "expect((meta.get('pages') as YArray<unknown>).length).toBe((originalMeta.get('pages') as YArray<unknown>).length);",
+            None,
+        ),
+        (
+            "expect(assetTypeContainer.getElementsByTagName('time').length).toEqual(
+          0,
+        );",
+            None,
+        ),
     ];
 
     let fix = vec![
         ("expect(files[\"length\"]).not.toBe(1);", "expect(files).not.toHaveLength(1);", None),
+        (r#"expect(files["length"]).toBe(1,);"#, "expect(files).toHaveLength(1,);", None),
         (
             "expect(files[\"length\"])[\"resolves\"].toBe(1,);",
             "expect(files)[\"resolves\"].toHaveLength(1,);",
@@ -243,9 +254,23 @@ fn tests() {
         ("expect(files.length).toEqual(1);", "expect(files).toHaveLength(1);", None),
         ("expect(files.length).toStrictEqual(1);", "expect(files).toHaveLength(1);", None),
         ("expect(files.length).not.toStrictEqual(1);", "expect(files).not.toHaveLength(1);", None),
+        (
+            "expect((meta.get('pages') as YArray<unknown>).length).toBe((originalMeta.get('pages') as YArray<unknown>).length);",
+            "expect((meta.get('pages') as YArray<unknown>)).toHaveLength((originalMeta.get('pages') as YArray<unknown>).length);",
+            None,
+        ),
+        (
+            "expect(assetTypeContainer.getElementsByTagName('time').length).toEqual(
+          0,
+        );",
+            "expect(assetTypeContainer.getElementsByTagName('time')).toHaveLength(
+          0,
+        );",
+            None,
+        ),
     ];
 
-    Tester::new(PreferToHaveLength::NAME, pass, fail)
+    Tester::new(PreferToHaveLength::NAME, PreferToHaveLength::PLUGIN, pass, fail)
         .with_jest_plugin(true)
         .expect_fix(fix)
         .test_and_snapshot();

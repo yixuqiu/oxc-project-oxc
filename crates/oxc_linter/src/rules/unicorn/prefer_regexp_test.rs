@@ -2,22 +2,17 @@ use oxc_ast::{
     ast::{Expression, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{GetSpan, Span};
 
 use crate::{ast_util::outermost_paren_parent, context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-regexp-test): Prefer RegExp#test() over String#match() and RegExp#exec()")]
-#[diagnostic(
-    severity(warning),
-    help("RegExp#test() exclusively returns a boolean and therefore is more efficient")
-)]
-struct PreferRegexpTestDiagnostic(#[label] pub Span);
+fn prefer_regexp_test_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer RegExp#test() over String#match() and RegExp#exec()")
+        .with_help("RegExp#test() exclusively returns a boolean and therefore is more efficient")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferRegexpTest;
@@ -33,25 +28,34 @@ declare_oxc_lint!(
     ///
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// if (string.match(/unicorn/)) { }
     /// if (/unicorn/.exec(string)) {}
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// if (/unicorn/.test(string)) {}
     /// Boolean(string.match(/unicorn/))
     ///
     /// ```
     PreferRegexpTest,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for PreferRegexpTest {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
+        let AstKind::CallExpression(call_expr) = node.kind() else {
+            return;
+        };
 
-        let Some(member_expr) = call_expr.callee.get_member_expr() else { return };
+        let Some(member_expr) = call_expr.callee.get_member_expr() else {
+            return;
+        };
 
         if call_expr.optional || call_expr.arguments.len() != 1 {
             return;
@@ -71,7 +75,9 @@ impl Rule for PreferRegexpTest {
             _ => return,
         };
 
-        let Some(parent) = outermost_paren_parent(node, ctx) else { return };
+        let Some(parent) = outermost_paren_parent(node, ctx) else {
+            return;
+        };
 
         match parent.kind() {
             AstKind::ForStatement(for_stmt) => {
@@ -82,7 +88,7 @@ impl Rule for PreferRegexpTest {
                 };
 
                 // Check if the `test` of the for statement is the same node as the call expression.
-                if std::ptr::addr_of!(**call_expr2) != call_expr as *const _ {
+                if !std::ptr::eq(call_expr2.as_ref(), call_expr) {
                     return;
                 }
             }
@@ -92,15 +98,19 @@ impl Rule for PreferRegexpTest {
                 };
 
                 // Check if the `test` of the conditional expression is the same node as the call expression.
-                if std::ptr::addr_of!(**call_expr2) != call_expr as *const _ {
+                if !std::ptr::eq(call_expr2.as_ref(), call_expr) {
                     return;
                 }
             }
 
             AstKind::Argument(_) => {
-                let Some(parent) = outermost_paren_parent(parent, ctx) else { return };
+                let Some(parent) = outermost_paren_parent(parent, ctx) else {
+                    return;
+                };
 
-                let AstKind::CallExpression(call_expr) = parent.kind() else { return };
+                let AstKind::CallExpression(call_expr) = parent.kind() else {
+                    return;
+                };
 
                 let Expression::Identifier(ident) = &call_expr.callee else {
                     return;
@@ -138,10 +148,29 @@ impl Rule for PreferRegexpTest {
                     return;
                 }
             }
-            _ => unreachable!("match or test {:?}", name),
+            _ => unreachable!("expected match or test, got: {:?}", name),
         }
 
-        ctx.diagnostic(PreferRegexpTestDiagnostic(span));
+        ctx.diagnostic_with_fix(prefer_regexp_test_diagnostic(span), |fixer| {
+            if name.as_str() == "exec" {
+                return fixer.replace(span, "test");
+            }
+            let mut fix = fixer.new_fix_with_capacity(3);
+
+            fix.push(fixer.replace(span, "test"));
+
+            fix.push(fixer.replace(
+                call_expr.arguments[0].span(),
+                fixer.source_range(member_expr.object().span()),
+            ));
+
+            fix.push(fixer.replace(
+                member_expr.object().span(),
+                fixer.source_range(call_expr.arguments[0].span()),
+            ));
+
+            fix
+        });
     }
 }
 
@@ -230,5 +259,39 @@ fn test() {
         r"!/a/v.exec(foo)",
     ];
 
-    Tester::new(PreferRegexpTest::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("const re = /a/; const bar = !foo.match(re)", "const re = /a/; const bar = !re.test(foo)"),
+        (
+            "const re = /a/; const bar = Boolean(foo.match(re))",
+            "const re = /a/; const bar = Boolean(re.test(foo))",
+        ),
+        ("const re = /a/; if (foo.match(re)) {}", "const re = /a/; if (re.test(foo)) {}"),
+        (
+            "const re = /a/; const bar = foo.match(re) ? 1 : 2",
+            "const re = /a/; const bar = re.test(foo) ? 1 : 2",
+        ),
+        (
+            "const re = /a/; while (foo.match(re)) foo = foo.slice(1);",
+            "const re = /a/; while (re.test(foo)) foo = foo.slice(1);",
+        ),
+        (
+            "const re = /a/; do {foo = foo.slice(1)} while (foo.match(re));",
+            "const re = /a/; do {foo = foo.slice(1)} while (re.test(foo));",
+        ),
+        (
+            "const re = /a/; for (; foo.match(re); ) foo = foo.slice(1);",
+            "const re = /a/; for (; re.test(foo); ) foo = foo.slice(1);",
+        ),
+        ("const re = /a/; const bar = !re.exec(foo)", "const re = /a/; const bar = !re.test(foo)"),
+        (
+            "const re = /a/; const bar = Boolean(re.exec(foo))",
+            "const re = /a/; const bar = Boolean(re.test(foo))",
+        ),
+        ("const re = /a/; if (re.exec(foo)) {}", "const re = /a/; if (re.test(foo)) {}"),
+        ("const re = /a/; if (someStr.match(re)) {}", "const re = /a/; if (re.test(someStr)) {}"),
+    ];
+
+    Tester::new(PreferRegexpTest::NAME, PreferRegexpTest::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

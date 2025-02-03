@@ -1,17 +1,15 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(no-lonely-if): Unexpected `if` as the only statement in a `if` block without `else`.")]
-#[diagnostic(severity(warning), help("Move the inner `if` test to the outer `if` test."))]
-struct NoLonelyIfDiagnostic(#[label] pub Span, #[label] pub Span);
+fn no_lonely_if_diagnostic(span: Span, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected `if` as the only statement in a `if` block without `else`.")
+        .with_help("Move the inner `if` test to the outer `if` test.")
+        .with_labels([span, span1])
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoLonelyIf;
@@ -26,26 +24,32 @@ declare_oxc_lint!(
     /// It can be confusing to have an `if` statement without an `else` clause as the only statement in an `if` block.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// if (foo) {
     ///         if (bar) {
     ///     }
     /// }
     /// if (foo) if (bar) baz();
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// if (foo && bar) {
     /// }
     /// if (foo && bar) baz();
     /// ```
     NoLonelyIf,
+    unicorn,
     pedantic
 );
 
 impl Rule for NoLonelyIf {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::IfStatement(if_stmt) = node.kind() else { return };
+        let AstKind::IfStatement(if_stmt) = node.kind() else {
+            return;
+        };
 
         if if_stmt.alternate.is_some() {
             return;
@@ -84,7 +88,7 @@ impl Rule for NoLonelyIf {
             _ => return,
         };
 
-        ctx.diagnostic(NoLonelyIfDiagnostic(
+        ctx.diagnostic(no_lonely_if_diagnostic(
             Span::new(if_stmt.span.start, if_stmt.span.start + 2),
             Span::new(parent_if_stmt_span.start, parent_if_stmt_span.start + 2),
         ));
@@ -208,5 +212,5 @@ fn test() {
     ",
     ];
 
-    Tester::new(NoLonelyIf::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoLonelyIf::NAME, NoLonelyIf::PLUGIN, pass, fail).test_and_snapshot();
 }

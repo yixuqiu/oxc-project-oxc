@@ -1,15 +1,16 @@
 [package]
-name                   = "oxc_diagnostics"
-version                = "0.12.5"
-authors.workspace      = true
-description.workspace  = true
-edition.workspace      = true
-homepage.workspace     = true
-keywords.workspace     = true
-license.workspace      = true
-repository.workspace   = true
+name = "oxc_diagnostics"
+version = "0.48.2"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include = ["/src"]
+keywords.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
-categories.workspace   = true
+description.workspace = true
 
 [lints]
 workspace = true
@@ -18,9 +19,5 @@ workspace = true
 doctest = false
 
 [dependencies]
-thiserror = { workspace = true }
-miette    = { workspace = true }
-
-unicode-width = { workspace = true }
-owo-colors    = { workspace = true }
-textwrap      = { workspace = true }
+cow-utils = { workspace = true }
+miette = { workspace = true }

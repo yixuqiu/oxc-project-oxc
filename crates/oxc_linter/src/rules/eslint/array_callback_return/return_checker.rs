@@ -1,4 +1,5 @@
 use oxc_ast::ast::{BlockStatement, FunctionBody, Statement, SwitchCase};
+use oxc_ecmascript::ToBoolean;
 
 /// `StatementReturnStatus` describes whether the CFG corresponding to
 /// the statement is termitated by return statement in all/some/nome of
@@ -133,14 +134,13 @@ pub fn check_statement(statement: &Statement) -> StatementReturnStatus {
             let right =
                 stmt.alternate.as_ref().map_or(StatementReturnStatus::NotReturn, check_statement);
 
-            test.get_boolean_value()
-                .map_or_else(|| left.join(right), |val| if val { left } else { right })
+            test.to_boolean().map_or_else(|| left.join(right), |val| if val { left } else { right })
         }
 
         Statement::WhileStatement(stmt) => {
             let test = &stmt.test;
             let inner_return = check_statement(&stmt.body);
-            if test.get_boolean_value() == Some(true) {
+            if test.to_boolean() == Some(true) {
                 inner_return
             } else {
                 inner_return.join(StatementReturnStatus::NotReturn)
@@ -279,7 +279,7 @@ mod tests {
     fn test_switch_always_explicit() {
         // Return Explicit
         let always_explicit = r#"
-    function() {
+    function d() {
       switch (a) {
         case "C":
           switch (b) {
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn test_switch_always_implicit() {
         let always_implicit = r#"
-    function() {
+    function d() {
       switch (a) {
         case "C":
           switch (b) {
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn test_switch_always_mixed() {
         let always_mixed = r#"
-        function() {
+        function d() {
           switch (a) {
             case "C":
               switch (b) {

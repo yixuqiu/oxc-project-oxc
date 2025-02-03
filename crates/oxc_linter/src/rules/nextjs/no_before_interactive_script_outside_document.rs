@@ -1,11 +1,8 @@
 use oxc_ast::{
-    ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXElementName},
+    ast::{JSXAttributeItem, JSXAttributeName, JSXAttributeValue},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -16,13 +13,11 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-before-interactive-script-outside-document): next/script's `beforeInteractive` strategy should not be used outside of `pages/_document.js`")]
-#[diagnostic(
-    severity(warning),
-    help("See https://nextjs.org/docs/messages/no-before-interactive-script-outside-document")
-)]
-struct NoBeforeInteractiveScriptOutsideDocumentDiagnostic(#[label] pub Span);
+fn no_before_interactive_script_outside_document_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("next/script's `beforeInteractive` strategy should not be used outside of `pages/_document.js`")
+        .with_help("See https://nextjs.org/docs/messages/no-before-interactive-script-outside-document")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoBeforeInteractiveScriptOutsideDocument;
@@ -38,19 +33,20 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoBeforeInteractiveScriptOutsideDocument,
+    nextjs,
     correctness
 );
 
 impl Rule for NoBeforeInteractiveScriptOutsideDocument {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::JSXOpeningElement(jsx_el) = node.kind() {
-            let Some(file_path) = ctx.file_path().to_str() else { return };
+            let Some(file_path) = ctx.file_path().to_str() else {
+                return;
+            };
             if is_in_app_dir(file_path) {
                 return;
             }
-            let tag_name = if let JSXElementName::Identifier(ident) = &jsx_el.name {
-                &ident.name
-            } else {
+            let Some(tag_name) = jsx_el.name.get_identifier_name() else {
                 return;
             };
             if jsx_el.attributes.len() == 0 {
@@ -78,11 +74,11 @@ impl Rule for NoBeforeInteractiveScriptOutsideDocument {
                         return;
                     }
                     let next_script_import_local_name = get_next_script_import_local_name(ctx);
-                    if !matches!(next_script_import_local_name, Some(import) if tag_name.as_str() == import.as_str())
+                    if !matches!(next_script_import_local_name, Some(import) if tag_name == import)
                     {
                         return;
                     }
-                    ctx.diagnostic(NoBeforeInteractiveScriptOutsideDocumentDiagnostic(
+                    ctx.diagnostic(no_before_interactive_script_outside_document_diagnostic(
                         strategy.span,
                     ));
                 }
@@ -93,8 +89,9 @@ impl Rule for NoBeforeInteractiveScriptOutsideDocument {
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use std::path::PathBuf;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         (
@@ -386,5 +383,11 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoBeforeInteractiveScriptOutsideDocument::NAME, pass, fail).test_and_snapshot();
+    Tester::new(
+        NoBeforeInteractiveScriptOutsideDocument::NAME,
+        NoBeforeInteractiveScriptOutsideDocument::PLUGIN,
+        pass,
+        fail,
+    )
+    .test_and_snapshot();
 }

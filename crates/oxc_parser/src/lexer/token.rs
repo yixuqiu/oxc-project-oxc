@@ -26,16 +26,17 @@ pub struct Token {
     /// [Lexer::escaped_templates]: [super::Lexer::escaped_templates]
     pub escaped: bool,
 
+    /// True if for numeric literal tokens that contain separator characters (`_`).
+    ///
+    /// Numeric literals are defined in Section 12.9.3 of the ECMAScript
+    /// standard and include [`Kind::Decimal`], [`Kind::Binary`],
+    /// [`Kind::Octal`], [`Kind::Hex`], etc.
+    has_separator: bool,
+
     // Padding to fill to 16 bytes.
     // This makes copying a `Token` 1 x xmmword load & store, rather than 1 x dword + 1 x qword
     // and `Token::default()` is 1 x xmmword store, rather than 1 x dword + 1 x qword.
-    _padding1: u8,
     _padding2: u32,
-}
-
-#[cfg(target_pointer_width = "64")]
-mod size_asserts {
-    static_assertions::assert_eq_size!(super::Token, [u8; 16]);
 }
 
 impl Token {
@@ -50,4 +51,21 @@ impl Token {
     pub fn escaped(&self) -> bool {
         self.escaped
     }
+
+    #[inline]
+    pub fn has_separator(&self) -> bool {
+        debug_assert!(!self.has_separator || self.kind.is_number());
+        self.has_separator
+    }
+
+    pub(crate) fn set_has_separator(&mut self) {
+        debug_assert!(!self.has_separator || self.kind.is_number() || self.kind == Kind::default());
+        self.has_separator = true;
+    }
+}
+
+#[cfg(test)]
+mod size_asserts {
+    use super::Token;
+    const _: () = assert!(std::mem::size_of::<Token>() == 16);
 }

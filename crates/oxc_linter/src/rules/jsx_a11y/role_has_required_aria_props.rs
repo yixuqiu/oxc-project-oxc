@@ -1,49 +1,46 @@
-use crate::{context::LintContext, rule::Rule, utils::has_jsx_prop_lowercase, AstNode};
 use oxc_ast::{
     ast::{JSXAttributeItem, JSXAttributeValue},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use phf::{phf_map, phf_set};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-jsx-a11y(role-has-required-aria-props): `{role}` role is missing required aria props `{props}`."
-)]
-#[diagnostic(
-    severity(warning),
-    help("Add missing aria props `{props}` to the element with `{role}` role.")
-)]
-struct RoleHasRequiredAriaPropsDiagnostic {
-    #[label]
-    pub span: Span,
-    pub role: String,
-    pub props: String,
+use crate::{context::LintContext, rule::Rule, utils::has_jsx_prop_ignore_case, AstNode};
+
+fn role_has_required_aria_props_diagnostic(span: Span, role: &str, props: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("`{role}` role is missing required aria props `{props}`."))
+        .with_help(format!("Add missing aria props `{props}` to the element with `{role}` role."))
+        .and_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct RoleHasRequiredAriaProps;
 declare_oxc_lint!(
     /// ### What it does
-    /// Enforces that elements with ARIA roles must have all required attributes for that role.
+    ///
+    /// Enforces that elements with ARIA roles must have all required attributes
+    /// for that role.
     ///
     /// ### Why is this bad?
-    /// Certain ARIA roles require specific attributes to express necessary semantics for assistive technology.
+    ///
+    /// Certain ARIA roles require specific attributes to express necessary
+    /// semantics for assistive technology.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
-    /// <div role="checkbox" />
     ///
-    /// // Good
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
+    /// <div role="checkbox" />
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <div role="checkbox" aria-checked="false" />
     /// ```
     RoleHasRequiredAriaProps,
+    jsx_a11y,
     correctness
 );
 
@@ -61,19 +58,23 @@ static ROLE_TO_REQUIRED_ARIA_PROPS: phf::Map<&'static str, phf::Set<&'static str
 impl Rule for RoleHasRequiredAriaProps {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::JSXOpeningElement(jsx_el) = node.kind() {
-            let Some(role_prop) = has_jsx_prop_lowercase(jsx_el, "role") else { return };
-            let JSXAttributeItem::Attribute(attr) = role_prop else { return };
-            let Some(JSXAttributeValue::StringLiteral(role_values)) = &attr.value else { return };
+            let Some(role_prop) = has_jsx_prop_ignore_case(jsx_el, "role") else {
+                return;
+            };
+            let JSXAttributeItem::Attribute(attr) = role_prop else {
+                return;
+            };
+            let Some(JSXAttributeValue::StringLiteral(role_values)) = &attr.value else {
+                return;
+            };
             let roles = role_values.value.split_whitespace();
             for role in roles {
                 if let Some(props) = ROLE_TO_REQUIRED_ARIA_PROPS.get(role) {
                     for prop in props {
-                        if has_jsx_prop_lowercase(jsx_el, prop).is_none() {
-                            ctx.diagnostic(RoleHasRequiredAriaPropsDiagnostic {
-                                span: attr.span,
-                                role: role.into(),
-                                props: (*prop).into(),
-                            });
+                        if has_jsx_prop_ignore_case(jsx_el, prop).is_none() {
+                            ctx.diagnostic(role_has_required_aria_props_diagnostic(
+                                attr.span, role, prop,
+                            ));
                         }
                     }
                 }
@@ -84,7 +85,6 @@ impl Rule for RoleHasRequiredAriaProps {
 
 #[test]
 fn test() {
-    use crate::rules::RoleHasRequiredAriaProps;
     use crate::tester::Tester;
 
     fn settings() -> serde_json::Value {
@@ -105,10 +105,25 @@ fn test() {
         ("<div role={role || 'button'} />", None, None, None),
         ("<div role={role || 'foobar'} />", None, None, None),
         ("<div role='row' />", None, None, None),
-        ("<span role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0'></span>", None, None, None),
-        ("<input role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0' {...props} type='checkbox' />", None, None, None),
+        (
+            "<span role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0'></span>",
+            None,
+            None,
+            None,
+        ),
+        (
+            "<input role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0' {...props} type='checkbox' />",
+            None,
+            None,
+            None,
+        ),
         ("<input type='checkbox' role='switch' />", None, None, None),
-        ("<MyComponent role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0' />", None, Some(settings()), None),
+        (
+            "<MyComponent role='checkbox' aria-checked='false' aria-labelledby='foo' tabindex='0' />",
+            None,
+            Some(settings()),
+            None,
+        ),
     ];
 
     let fail = vec![
@@ -132,5 +147,6 @@ fn test() {
         ("<MyComponent role='combobox' />", None, Some(settings()), None),
     ];
 
-    Tester::new(RoleHasRequiredAriaProps::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RoleHasRequiredAriaProps::NAME, RoleHasRequiredAriaProps::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

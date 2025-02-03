@@ -2,20 +2,23 @@ use oxc_ast::{
     ast::{Argument, BindingPatternKind, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
-use oxc_span::{Atom, CompactStr, Span};
+use oxc_span::{CompactStr, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(catch-error-name): The catch parameter {0:?} should be named {1:?}")]
-#[diagnostic(severity(warning))]
-struct CatchErrorNameDiagnostic(CompactStr, CompactStr, #[label] pub Span);
+fn catch_error_name_diagnostic(
+    caught_ident: &str,
+    expected_name: &str,
+    span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!(
+        "The catch parameter {caught_ident:?} should be named {expected_name:?}"
+    ))
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct CatchErrorName(Box<CatchErrorNameConfig>);
@@ -45,18 +48,23 @@ declare_oxc_lint!(
     ///
     /// This rule enforces naming conventions for catch statements.
     ///
-    /// ### Example
+    /// ### Why is this bad?
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    ///
-    /// // fail
     /// try { } catch (foo) { }
+    /// ```
     ///
-    /// // pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// try { } catch (error) { }
-    ///
     /// ```
     CatchErrorName,
-    style
+    unicorn,
+    style,
+    pending
 );
 
 impl Rule for CatchErrorName {
@@ -68,7 +76,7 @@ impl Rule for CatchErrorName {
             .unwrap_or(&vec![])
             .iter()
             .map(serde_json::Value::as_str)
-            .filter(std::option::Option::is_some)
+            .filter(Option::is_some)
             .map(|x| CompactStr::from(x.unwrap()))
             .collect::<Vec<CompactStr>>();
 
@@ -93,19 +101,19 @@ impl Rule for CatchErrorName {
                 }
 
                 if binding_ident.name.starts_with('_') {
-                    if symbol_has_references(binding_ident.symbol_id.get(), ctx) {
-                        ctx.diagnostic(CatchErrorNameDiagnostic(
-                            binding_ident.name.to_compact_str(),
-                            self.name.clone(),
+                    if symbol_has_references(binding_ident.symbol_id(), ctx) {
+                        ctx.diagnostic(catch_error_name_diagnostic(
+                            binding_ident.name.as_str(),
+                            &self.name,
                             binding_ident.span,
                         ));
                     }
                     return;
                 }
 
-                ctx.diagnostic(CatchErrorNameDiagnostic(
-                    binding_ident.name.to_compact_str(),
-                    self.name.clone(),
+                ctx.diagnostic(catch_error_name_diagnostic(
+                    binding_ident.name.as_str(),
+                    &self.name,
                     binding_ident.span,
                 ));
             }
@@ -134,16 +142,17 @@ impl Rule for CatchErrorName {
 }
 
 impl CatchErrorName {
-    fn is_name_allowed(&self, name: &Atom) -> bool {
-        self.name == name || self.ignore.iter().any(|s| s.as_str() == name.as_str())
+    fn is_name_allowed(&self, name: &str) -> bool {
+        self.name == name || self.ignore.iter().any(|s| s.as_str() == name)
     }
+
     fn check_function_arguments(
         &self,
         arg0: &Argument,
         ctx: &LintContext,
-    ) -> Option<CatchErrorNameDiagnostic> {
+    ) -> Option<OxcDiagnostic> {
         let expr = arg0.as_expression()?;
-        let expr = expr.without_parenthesized();
+        let expr = expr.without_parentheses();
 
         if let Expression::ArrowFunctionExpression(arrow_expr) = expr {
             if let Some(arg0) = arrow_expr.params.items.first() {
@@ -153,10 +162,10 @@ impl CatchErrorName {
                     }
 
                     if v.name.starts_with('_') {
-                        if symbol_has_references(v.symbol_id.get(), ctx) {
-                            ctx.diagnostic(CatchErrorNameDiagnostic(
-                                v.name.to_compact_str(),
-                                self.name.clone(),
+                        if symbol_has_references(v.symbol_id(), ctx) {
+                            ctx.diagnostic(catch_error_name_diagnostic(
+                                v.name.as_str(),
+                                &self.name,
                                 v.span,
                             ));
                         }
@@ -164,11 +173,7 @@ impl CatchErrorName {
                         return None;
                     }
 
-                    return Some(CatchErrorNameDiagnostic(
-                        v.name.to_compact_str(),
-                        self.name.clone(),
-                        v.span,
-                    ));
+                    return Some(catch_error_name_diagnostic(v.name.as_str(), &self.name, v.span));
                 }
             }
         }
@@ -181,10 +186,10 @@ impl CatchErrorName {
                     }
 
                     if binding_ident.name.starts_with('_') {
-                        if symbol_has_references(binding_ident.symbol_id.get(), ctx) {
-                            ctx.diagnostic(CatchErrorNameDiagnostic(
-                                binding_ident.name.to_compact_str(),
-                                self.name.clone(),
+                        if symbol_has_references(binding_ident.symbol_id(), ctx) {
+                            ctx.diagnostic(catch_error_name_diagnostic(
+                                binding_ident.name.as_str(),
+                                &self.name,
                                 binding_ident.span,
                             ));
                         }
@@ -192,9 +197,9 @@ impl CatchErrorName {
                         return None;
                     }
 
-                    return Some(CatchErrorNameDiagnostic(
-                        binding_ident.name.to_compact_str(),
-                        self.name.clone(),
+                    return Some(catch_error_name_diagnostic(
+                        binding_ident.name.as_str(),
+                        &self.name,
                         binding_ident.span,
                     ));
                 }
@@ -205,11 +210,8 @@ impl CatchErrorName {
     }
 }
 
-fn symbol_has_references(symbol_id: Option<SymbolId>, ctx: &LintContext) -> bool {
-    if let Some(symbol_id) = symbol_id {
-        return ctx.semantic().symbol_references(symbol_id).next().is_some();
-    }
-    false
+fn symbol_has_references(symbol_id: SymbolId, ctx: &LintContext) -> bool {
+    ctx.semantic().symbol_references(symbol_id).next().is_some()
 }
 
 #[test]
@@ -280,5 +282,5 @@ fn test() {
         ("promise.then(undefined, (foo) => { })", None),
     ];
 
-    Tester::new(CatchErrorName::NAME, pass, fail).test_and_snapshot();
+    Tester::new(CatchErrorName::NAME, CatchErrorName::PLUGIN, pass, fail).test_and_snapshot();
 }

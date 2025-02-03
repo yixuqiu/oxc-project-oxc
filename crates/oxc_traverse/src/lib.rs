@@ -60,18 +60,29 @@
 //! scheme could very easily be derailed entirely by a single mistake, so in my opinion, it's unwise
 //! to edit by hand.
 
+use std::ptr;
+
 use oxc_allocator::Allocator;
-
 use oxc_ast::ast::Program;
+use oxc_semantic::{ScopeTree, SymbolTable};
 
-pub mod ancestor;
-pub use ancestor::Ancestor;
+pub mod ast_operations;
 mod context;
-pub use context::{FinderRet, TraverseCtx};
-#[allow(clippy::module_inception)]
-mod traverse;
-pub use traverse::Traverse;
-mod walk;
+pub use context::{
+    BoundIdentifier, MaybeBoundIdentifier, ReusableTraverseCtx, TraverseAncestry, TraverseCtx,
+    TraverseScoping,
+};
+
+mod generated {
+    pub mod ancestor;
+    pub(super) mod scopes_collector;
+    pub mod traverse;
+    pub(super) mod walk;
+}
+pub use generated::{ancestor, ancestor::Ancestor, traverse::Traverse};
+use generated::{scopes_collector, walk::walk_ast};
+
+mod compile_fail_tests;
 
 /// Traverse AST with a [`Traverse`] impl.
 ///
@@ -113,7 +124,7 @@ mod walk;
 /// struct MyTransform;
 ///
 /// impl<'a> Traverse<'a> for MyTransform {
-///     fn enter_numeric_literal(&mut self, node: &mut NumericLiteral<'a>, ctx: &TraverseCtx<'a>) {
+///     fn enter_numeric_literal(&mut self, node: &mut NumericLiteral<'a>, ctx: &mut TraverseCtx<'a>) {
 ///         // Read parent
 ///         if let Ancestor::BinaryExpressionRight(bin_expr_ref) = ctx.parent() {
 ///             // This is legal
@@ -126,7 +137,7 @@ mod walk;
 ///         }
 ///
 ///         // Read grandparent
-///         if let Some(Ancestor::ExpressionStatementExpression(stmt_ref)) = ctx.ancestor(2) {
+///         if let Ancestor::ExpressionStatementExpression(stmt_ref) = ctx.ancestor(1) {
 ///             // This is legal
 ///             println!("expression stmt's span: {:?}", stmt_ref.span());
 ///
@@ -136,14 +147,56 @@ mod walk;
 ///     }
 /// }
 /// ```
-#[allow(unsafe_code)]
 pub fn traverse_mut<'a, Tr: Traverse<'a>>(
     traverser: &mut Tr,
-    program: &mut Program<'a>,
     allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    symbols: SymbolTable,
+    scopes: ScopeTree,
+) -> (SymbolTable, ScopeTree) {
+    let mut ctx = ReusableTraverseCtx::new(scopes, symbols, allocator);
+    traverse_mut_with_ctx(traverser, program, &mut ctx);
+    ctx.into_symbol_table_and_scope_tree()
+}
+
+/// Traverse AST with a [`Traverse`] impl, reusing an existing [`ReusableTraverseCtx`].
+///
+/// [`ReusableTraverseCtx`] is specific to a single AST. It will likely cause malfunction if
+/// `traverse_mut_with_ctx` is called with a [`Program`] and [`ReusableTraverseCtx`] which do not match.
+///
+/// See [`traverse_mut`] for more details of how traversal works.
+pub fn traverse_mut_with_ctx<'a, Tr: Traverse<'a>>(
+    traverser: &mut Tr,
+    program: &mut Program<'a>,
+    ctx: &mut ReusableTraverseCtx<'a>,
 ) {
-    let mut ctx = TraverseCtx::new(allocator);
-    // SAFETY: Walk functions are constructed to avoid unsoundness
-    unsafe { walk::walk_program(traverser, program as *mut Program, &mut ctx) };
+    let program = ptr::from_mut(program);
+
+    let ctx = ctx.get_mut();
+
+    // Check that `TraverseAncestry`'s stack is in correct state
     debug_assert!(ctx.ancestors_depth() == 1);
+    debug_assert!(matches!(ctx.parent(), Ancestor::None));
+
+    // SAFETY:
+    // `program` is a valid pointer to a `Program<'a>` - it was created from a `&mut Program<'a>`.
+    //
+    // `TraverseCtx`s are always created with only `Ancestor::None` on `TraverseAncestry` stack.
+    // `TraverseCtx` provides no external interfaces for caller to mutate `TraverseAncestry`,
+    // so that cannot be changed by the caller.
+    //
+    // `walk_*` methods never alter the initial entry on `TraverseAncestry`'s stack.
+    // `walk_*` methods always follow a `push` to `TraverseAncestry`'s stack with a corresponding `pop`.
+    // So at end of traversal, `TraverseAncestry`'s stack is always back in the state it was at start
+    // of traversal (single `Ancestor::None` entry).
+    //
+    // `ctx` was contained in a `ReusableTraverseCtx<'a>`. `ReusableTraverseCtx<'a>` provides no external
+    // interfaces for caller to mutate the `TraverseCtx` it contains.
+    //
+    // Therefore `TraverseAncestry`'s stack is guaranteed to only contain single `Ancestor::None` entry.
+    unsafe { walk_ast(traverser, program, ctx) };
+
+    // Check that `TraverseAncestry`'s stack is in correct state
+    debug_assert!(ctx.ancestors_depth() == 1);
+    debug_assert!(matches!(ctx.parent(), Ancestor::None));
 }

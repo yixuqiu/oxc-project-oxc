@@ -1,7 +1,4 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -11,36 +8,43 @@ use crate::{
     utils::{should_ignore_as_internal, should_ignore_as_private},
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsdoc(require-property-description): Missing description in @property tag.")]
-#[diagnostic(severity(warning), help("Add a description to this @property tag."))]
-struct RequirePropertyDescriptionDiagnostic(#[label] pub Span);
+fn require_property_description_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Missing description in @property tag.")
+        .with_help("Add a description to this @property tag.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct RequirePropertyDescription;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Requires that all `@property` tags have descriptions.
     ///
     /// ### Why is this bad?
+    ///
     /// The description of a property should be documented.
     ///
-    /// ### Example
-    /// ```javascript
-    /// // Passing
-    /// /**
-    ///  * @typedef {SomeType} SomeTypedef
-    ///  * @property {number} foo Foo.
-    ///  */
+    /// ### Examples
     ///
-    /// // Failing
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// /**
     ///  * @typedef {SomeType} SomeTypedef
     ///  * @property {number} foo
     ///  */
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /**
+    ///  * @typedef {SomeType} SomeTypedef
+    ///  * @property {number} foo Foo.
+    ///  */
+    /// ```
     RequirePropertyDescription,
+    jsdoc,
     correctness
 );
 
@@ -67,7 +71,7 @@ impl Rule for RequirePropertyDescription {
                     continue;
                 };
 
-                ctx.diagnostic(RequirePropertyDescriptionDiagnostic(tag_name.span));
+                ctx.diagnostic(require_property_description_diagnostic(tag_name.span));
             }
         }
     }
@@ -198,5 +202,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(RequirePropertyDescription::NAME, pass, fail).test_and_snapshot();
+    Tester::new(RequirePropertyDescription::NAME, RequirePropertyDescription::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

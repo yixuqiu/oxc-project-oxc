@@ -1,26 +1,20 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule, AstNode, Fix};
+use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoNestedTernaryDiagnostic {
-    #[error("eslint-plugin-unicorn(no-nested-ternary): Unexpected nested ternary expression without parentheses.")]
-    #[diagnostic(severity(warning), help("Add parentheses around the nested ternary expression."))]
-    UnparenthesizedNestedTernary(#[label] Span),
-    #[error(
-        "eslint-plugin-unicorn(no-nested-ternary): Unexpected deeply nested ternary expression."
-    )]
-    #[diagnostic(
-        severity(warning),
-        help("Avoid nesting ternary expressions for more than one level.")
-    )]
-    DeeplyNestedTernary(#[label] Span),
+fn unparenthesized_nested_ternary(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected nested ternary expression without parentheses.")
+        .with_help("Add parentheses around the nested ternary expression.")
+        .with_label(span)
+}
+
+fn deeply_nested_ternary(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected deeply nested ternary expression.")
+        .with_help("Avoid nesting ternary expressions for more than one level.")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -28,29 +22,38 @@ pub struct NoNestedTernary;
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// This rule disallows deeply nested ternary expressions.
     /// Nested ternary expressions that are only one level deep and wrapped in parentheses are allowed.
     ///
     /// ### Why is this bad?
+    ///
     /// Nesting ternary expressions can make code more difficult to understand.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Fail
     /// const foo = i > 5 ? i < 100 ? true : false : true;
     /// const foo = i > 5 ? true : (i < 100 ? true : (i < 1000 ? true : false));
+    /// ```
     ///
-    /// // Pass
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// const foo = i > 5 ? (i < 100 ? true : false) : true;
     /// const foo = i > 5 ? (i < 100 ? true : false) : (i < 100 ? true : false);
     /// ```
     NoNestedTernary,
-    restriction
+    unicorn,
+    restriction,
+    conditional_fix
 );
 
 impl Rule for NoNestedTernary {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::ConditionalExpression(cond_expr) = node.kind() else { return };
+        let AstKind::ConditionalExpression(cond_expr) = node.kind() else {
+            return;
+        };
 
         if matches!(&cond_expr.test.get_inner_expression(), Expression::ConditionalExpression(_))
             || matches!(
@@ -88,20 +91,14 @@ impl Rule for NoNestedTernary {
                 if let AstKind::ParenthesizedExpression(_) = parent_node.kind() {
                     return;
                 }
-                ctx.diagnostic_with_fix(
-                    NoNestedTernaryDiagnostic::UnparenthesizedNestedTernary(cond_expr.span),
-                    || {
-                        Fix::new(
-                            format!("({})", cond_expr.span.source_text(ctx.source_text())),
-                            cond_expr.span,
-                        )
-                    },
-                );
+                ctx.diagnostic_with_fix(unparenthesized_nested_ternary(cond_expr.span), |fixer| {
+                    let content = format!("({})", fixer.source_range(cond_expr.span));
+                    fixer.replace(cond_expr.span, content)
+                });
             }
-            2 => {
-                ctx.diagnostic(NoNestedTernaryDiagnostic::DeeplyNestedTernary(cond_expr.span));
+            _ => {
+                ctx.diagnostic(deeply_nested_ternary(cond_expr.span));
             }
-            _ => unreachable!(),
         }
     }
 }
@@ -180,5 +177,7 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoNestedTernary::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(NoNestedTernary::NAME, NoNestedTernary::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

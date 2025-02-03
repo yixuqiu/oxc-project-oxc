@@ -2,19 +2,15 @@ use oxc_ast::{
     ast::{Statement, VariableDeclarationKind},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-case-declarations): Unexpected lexical declaration in case block.")]
-#[diagnostic(severity(warning))]
-struct NoCaseDeclarationsDiagnostic(#[label] pub Span);
+fn no_case_declarations_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected lexical declaration in case block.").with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoCaseDeclarations;
@@ -30,21 +26,22 @@ declare_oxc_lint!(
     ///
     /// ### Example
     /// ```javascript
-    // switch (foo) {
-    //   case 1:
-    //       let x = 1;
-    //       break;
-    //   case 2:
-    //       const y = 2;
-    //       break;
-    //   case 3:
-    //       function f() {}
-    //       break;
-    //   default:
-    //       class C {}
-    // }
+    /// switch (foo) {
+    ///   case 1:
+    ///       let x = 1;
+    ///       break;
+    ///   case 2:
+    ///       const y = 2;
+    ///       break;
+    ///   case 3:
+    ///       function f() {}
+    ///       break;
+    ///   default:
+    ///       class C {}
+    /// }
     /// ```
     NoCaseDeclarations,
+    eslint,
     pedantic
 );
 
@@ -58,22 +55,22 @@ impl Rule for NoCaseDeclarations {
                     Statement::FunctionDeclaration(d) => {
                         let start = d.span.start;
                         let end = start + 8;
-                        ctx.diagnostic(NoCaseDeclarationsDiagnostic(Span::new(start, end)));
+                        ctx.diagnostic(no_case_declarations_diagnostic(Span::new(start, end)));
                     }
                     Statement::ClassDeclaration(d) => {
                         let start = d.span.start;
                         let end = start + 5;
-                        ctx.diagnostic(NoCaseDeclarationsDiagnostic(Span::new(start, end)));
+                        ctx.diagnostic(no_case_declarations_diagnostic(Span::new(start, end)));
                     }
                     Statement::VariableDeclaration(var) if var.kind.is_lexical() => {
                         let start = var.span.start;
                         let end = match var.kind {
-                            VariableDeclarationKind::Var => unreachable!(),
                             VariableDeclarationKind::Const => 5,
                             VariableDeclarationKind::Let => 3,
+                            _ => unreachable!(),
                         };
                         let end = start + end;
-                        ctx.diagnostic(NoCaseDeclarationsDiagnostic(Span::new(start, end)));
+                        ctx.diagnostic(no_case_declarations_diagnostic(Span::new(start, end)));
                     }
                     _ => {}
                 };
@@ -107,5 +104,6 @@ fn test() {
         ("switch (a) { default: class C {} break; }", None),
     ];
 
-    Tester::new(NoCaseDeclarations::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoCaseDeclarations::NAME, NoCaseDeclarations::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

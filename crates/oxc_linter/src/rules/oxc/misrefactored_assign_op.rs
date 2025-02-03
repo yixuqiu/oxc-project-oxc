@@ -3,10 +3,7 @@ use oxc_ast::{
     ast::{match_member_expression, AssignmentTarget, Expression, SimpleAssignmentTarget},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{AssignmentOperator, BinaryOperator};
@@ -14,14 +11,17 @@ use oxc_syntax::operator::{AssignmentOperator, BinaryOperator};
 use crate::{
     context::LintContext,
     rule::Rule,
-    utils::{is_same_member_expression, is_same_reference},
+    utils::{is_same_expression, is_same_member_expression},
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("oxc(misrefactored-assign-op): Misrefactored assign op. Variable appears on both sides of an assignment operation")]
-#[diagnostic(severity(warning), help("Did you mean `{1}`?"))]
-struct MisrefactoredAssignOpDiagnostic(#[label] pub Span, pub String);
+fn misrefactored_assign_op_diagnostic(span: Span, suggestion: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Misrefactored assign op. Variable appears on both sides of an assignment operation",
+    )
+    .with_help(format!("Did you mean `{suggestion}`?"))
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct MisrefactoredAssignOp;
@@ -38,17 +38,22 @@ declare_oxc_lint!(
     /// Most likely these are bugs where one meant to write `a op= b`.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// a += a + b;
     /// a -= a - b;
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// a += b;
     /// a -= b;
     /// ```
     MisrefactoredAssignOp,
+    oxc,
     suspicious,
+    pending
 );
 
 impl Rule for MisrefactoredAssignOp {
@@ -64,9 +69,9 @@ impl Rule for MisrefactoredAssignOp {
 
             // lhs op= l op r
             if assignment_target_eq_expr(&assignment_expr.left, &binary_expr.left, ctx) {
-                ctx.diagnostic(MisrefactoredAssignOpDiagnostic(
+                ctx.diagnostic(misrefactored_assign_op_diagnostic(
                     assignment_expr.span,
-                    format!(
+                    &format!(
                         "{} {} {}",
                         assignment_expr.left.span().source_text(ctx.source_text()),
                         assignment_expr.operator.as_str(),
@@ -79,9 +84,9 @@ impl Rule for MisrefactoredAssignOp {
             if is_commutative_operator(binary_expr.operator)
                 && assignment_target_eq_expr(&assignment_expr.left, &binary_expr.right, ctx)
             {
-                ctx.diagnostic(MisrefactoredAssignOpDiagnostic(
+                ctx.diagnostic(misrefactored_assign_op_diagnostic(
                     assignment_expr.span,
-                    format!(
+                    &format!(
                         "{} {} {}",
                         assignment_expr.left.span().source_text(ctx.source_text()),
                         assignment_expr.operator.as_str(),
@@ -98,6 +103,7 @@ fn assignment_target_eq_expr<'a>(
     right_expr: &Expression<'_>,
     ctx: &LintContext<'a>,
 ) -> bool {
+    let right_expr = right_expr.get_inner_expression();
     if let Some(simple_assignment_target) = assignment_target.as_simple_assignment_target() {
         return match simple_assignment_target {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) => {
@@ -116,16 +122,19 @@ fn assignment_target_eq_expr<'a>(
                 }
             }
             SimpleAssignmentTarget::TSAsExpression(ts_expr) => {
-                is_same_reference(&ts_expr.expression, right_expr, ctx)
+                is_same_expression(&ts_expr.expression, right_expr, ctx)
             }
             SimpleAssignmentTarget::TSSatisfiesExpression(ts_expr) => {
-                is_same_reference(&ts_expr.expression, right_expr, ctx)
+                is_same_expression(&ts_expr.expression, right_expr, ctx)
             }
             SimpleAssignmentTarget::TSNonNullExpression(ts_expr) => {
-                is_same_reference(&ts_expr.expression, right_expr, ctx)
+                is_same_expression(&ts_expr.expression, right_expr, ctx)
             }
             SimpleAssignmentTarget::TSTypeAssertion(ts_expr) => {
-                is_same_reference(&ts_expr.expression, right_expr, ctx)
+                is_same_expression(&ts_expr.expression, right_expr, ctx)
+            }
+            SimpleAssignmentTarget::TSInstantiationExpression(ts_expr) => {
+                is_same_expression(&ts_expr.expression, right_expr, ctx)
             }
         };
     }
@@ -213,7 +222,12 @@ fn test() {
         //~^ ERROR: variable appears on both sides of an assignment operation
         "a *= a * a;",
         //~^ ERROR: variable appears on both sides of an assignment operation
+        "a *= a * (a as number);",
+        //~^ ERROR: variable appears on both sides of an assignment operation
+        "a *= (a as string) * (a as number);",
+        //~^ ERROR: variable appears on both sides of an assignment operation
     ];
 
-    Tester::new(MisrefactoredAssignOp::NAME, pass, fail).test_and_snapshot();
+    Tester::new(MisrefactoredAssignOp::NAME, MisrefactoredAssignOp::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

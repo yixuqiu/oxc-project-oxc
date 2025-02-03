@@ -1,20 +1,16 @@
-use oxc_diagnostics::{
-    miette::{self, diagnostic, Diagnostic},
-    thiserror::Error,
-};
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::{context::LintContext, rule::Rule};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-enum NoUnusedModulesDiagnostic {
-    #[error("eslint-plugin-import(no-unused-modules): No exports found")]
-    #[diagnostic(severity(warning))]
-    NoExportsFound(#[label] Span),
+fn no_exports_found(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("No exports found").with_label(span)
 }
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/docs/rules/no-unused-modules.md>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/no-unused-modules.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoUnusedModules {
     missing_exports: bool,
@@ -29,7 +25,19 @@ declare_oxc_lint!(
     /// * individual exports not being statically imported or requireed from other modules in the same project
     /// * dynamic imports are supported if argument is a literal string
     ///
+    /// ### Why is this bad?
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// ```
     NoUnusedModules,
+    import,
     nursery
 );
 
@@ -48,9 +56,9 @@ impl Rule for NoUnusedModules {
     }
 
     fn run_once(&self, ctx: &LintContext<'_>) {
-        let module_record = ctx.semantic().module_record();
+        let module_record = ctx.module_record();
         if self.missing_exports && module_record.local_export_entries.is_empty() {
-            ctx.diagnostic(NoUnusedModulesDiagnostic::NoExportsFound(Span::new(0, 0)));
+            ctx.diagnostic(no_exports_found(Span::new(0, 0)));
         }
         if self.unused_exports {
             // TODO: implement unused exports
@@ -96,7 +104,7 @@ fn test() {
         ("/* const a = 1 */", Some(missing_exports_options.clone())),
     ];
 
-    Tester::new(NoUnusedModules::NAME, pass, fail)
+    Tester::new(NoUnusedModules::NAME, NoUnusedModules::PLUGIN, pass, fail)
         .change_rule_path("missing-exports.js")
         .with_import_plugin(true)
         .test_and_snapshot();
@@ -115,7 +123,7 @@ fn test() {
 
     // let fail = vec![];
 
-    // Tester::new(NoUnusedModules::NAME, pass, fail)
+    // Tester::new(NoUnusedModules::NAME, NoUnusedModules::PLUGIN, pass, fail)
     //     .change_rule_path("unused-exports.js")
     //     .with_import_plugin(true)
     //     .test_and_snapshot();

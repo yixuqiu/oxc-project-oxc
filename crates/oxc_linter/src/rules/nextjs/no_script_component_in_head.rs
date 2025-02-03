@@ -2,22 +2,17 @@ use oxc_ast::{
     ast::{ImportDeclarationSpecifier, JSXChild, JSXElementName, ModuleDeclaration},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-script-component-in-head): Prevent usage of `next/script` in `next/head` component.")]
-#[diagnostic(
-    severity(warning),
-    help("See https://nextjs.org/docs/messages/no-script-component-in-head")
-)]
-struct NoScriptComponentInHeadDiagnostic(#[label] pub Span);
+fn no_script_component_in_head_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prevent usage of `next/script` in `next/head` component.")
+        .with_help("See https://nextjs.org/docs/messages/no-script-component-in-head")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoScriptComponentInHead;
@@ -33,6 +28,7 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoScriptComponentInHead,
+    nextjs,
     correctness
 );
 
@@ -48,7 +44,9 @@ impl Rule for NoScriptComponentInHead {
             return;
         }
 
-        let Some(import_specifiers) = &import_decl.specifiers else { return };
+        let Some(import_specifiers) = &import_decl.specifiers else {
+            return;
+        };
 
         let Some(default_import) = import_specifiers.iter().find_map(|import_specifier| {
             let ImportDeclarationSpecifier::ImportDefaultSpecifier(import_default_specifier) =
@@ -62,12 +60,14 @@ impl Rule for NoScriptComponentInHead {
             return;
         };
 
-        for reference in
-            ctx.semantic().symbol_references(default_import.local.symbol_id.get().unwrap())
-        {
-            let Some(node) = ctx.nodes().parent_node(reference.node_id()) else { return };
+        for reference in ctx.semantic().symbol_references(default_import.local.symbol_id()) {
+            let Some(node) = ctx.nodes().parent_node(reference.node_id()) else {
+                return;
+            };
 
-            let AstKind::JSXElementName(_) = node.kind() else { continue };
+            let AstKind::JSXElementName(_) = node.kind() else {
+                continue;
+            };
             let parent_node = ctx.nodes().parent_node(node.id()).unwrap();
             let AstKind::JSXOpeningElement(jsx_opening_element) = parent_node.kind() else {
                 continue;
@@ -79,11 +79,11 @@ impl Rule for NoScriptComponentInHead {
 
             for child in &jsx_element.children {
                 if let JSXChild::Element(child_element) = child {
-                    if let JSXElementName::Identifier(child_element_name) =
+                    if let JSXElementName::IdentifierReference(child_element_name) =
                         &child_element.opening_element.name
                     {
                         if child_element_name.name.as_str() == "Script" {
-                            ctx.diagnostic(NoScriptComponentInHeadDiagnostic(
+                            ctx.diagnostic(no_script_component_in_head_diagnostic(
                                 jsx_opening_element.name.span(),
                             ));
                         }
@@ -99,32 +99,35 @@ fn test() {
     use crate::tester::Tester;
 
     let pass = vec![
-        r#"import Script from "next/script";
-			     const Head = ({children}) => children
-			
-			    export default function Index() {
-			      return (
+        r#"
+            import Script from "next/script";
+			const Head = ({children}) => children
+
+			export default function Index() {
+			    return (
 			        <Head>
-			          <Script></Script>
+			            <Script></Script>
 			        </Head>
-			      );
-			    }
-			    "#,
+			    );
+			}
+		"#,
     ];
 
     let fail = vec![
         r#"
-			      import Head from "next/head";
-			      import Script from "next/script";
-			
-			      export default function Index() {
-			        return (
-			            <Head>
-			              <Script></Script>
-			            </Head>
-			        );
-			      }"#,
+			import Head from "next/head";
+			import Script from "next/script";
+
+			export default function Index() {
+			    return (
+			        <Head>
+			            <Script></Script>
+			        </Head>
+			    );
+		    }
+        "#,
     ];
 
-    Tester::new(NoScriptComponentInHead::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoScriptComponentInHead::NAME, NoScriptComponentInHead::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

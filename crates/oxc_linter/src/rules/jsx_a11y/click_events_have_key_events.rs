@@ -1,8 +1,5 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
@@ -17,10 +14,11 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsx-a11y(click-events-have-key-events): Enforce a clickable non-interactive element has at least one keyboard event listener.")]
-#[diagnostic(severity(warning), help("Visible, non-interactive elements with click handlers must have one of keyup, keydown, or keypress listener."))]
-struct ClickEventsHaveKeyEventsDiagnostic(#[label] pub Span);
+fn click_events_have_key_events_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Enforce a clickable non-interactive element has at least one keyboard event listener.")
+        .with_help("Visible, non-interactive elements with click handlers must have one of keyup, keydown, or keypress listener.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct ClickEventsHaveKeyEvents;
@@ -36,14 +34,18 @@ declare_oxc_lint!(
     /// This does not apply for interactive or hidden elements.
     ///
     /// ### Example
-    /// ```jsx
-    /// // Good
-    /// <div onClick={() => void 0} onKeyDown={() => void 0} />
     ///
-    /// // Bad
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <div onClick={() => void 0} />
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
+    /// <div onClick={() => void 0} onKeyDown={() => void 0} />
+    /// ```
     ClickEventsHaveKeyEvents,
+    jsx_a11y,
     correctness
 );
 
@@ -58,9 +60,8 @@ impl Rule for ClickEventsHaveKeyEvents {
         };
 
         // Check only native DOM elements or custom component via settings
-        let Some(element_type) = get_element_type(ctx, jsx_opening_el) else {
-            return;
-        };
+        let element_type = get_element_type(ctx, jsx_opening_el);
+
         if !HTML_TAG.contains(&element_type) {
             return;
         };
@@ -82,7 +83,7 @@ impl Rule for ClickEventsHaveKeyEvents {
             return;
         }
 
-        ctx.diagnostic(ClickEventsHaveKeyEventsDiagnostic(jsx_opening_el.span));
+        ctx.diagnostic(click_events_have_key_events_diagnostic(jsx_opening_el.span));
     }
 }
 
@@ -147,5 +148,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(ClickEventsHaveKeyEvents::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ClickEventsHaveKeyEvents::NAME, ClickEventsHaveKeyEvents::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

@@ -1,18 +1,16 @@
-use crate::{context::LintContext, rule::Rule, AstNode};
-
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::UnaryOperator;
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-void): Disallow `void` operators")]
-#[diagnostic(severity(warning), help("Expected 'undefined' and instead saw 'void'."))]
-struct NoVoidDiagnostic(#[label] pub Span);
+use crate::{context::LintContext, rule::Rule, AstNode};
+
+fn no_void_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected `void` operator")
+        .with_help("Use `undefined` instead")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoVoid {
@@ -24,20 +22,28 @@ declare_oxc_lint!(
     ///
     /// Disallow `void` operators.
     ///
-    /// ### Example
+    /// Why is this bad
     ///
-    /// ```javascript
-    /// // error
+    /// The `void` operator is often used to obtain the `undefined` primitive value, but it is unnecessary. You can use `undefined` directly instead.
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```ts
     /// void 0;
     /// var foo = void 0;
+    /// ```
     ///
-    /// // success
-    /// "var foo = bar()",
-    /// "foo.void()",
-    /// "foo.void = bar",
+    /// Examples of **correct** code for this rule:
+    /// ```ts
+    /// "var foo = bar()";
+    /// "foo.void()";
+    /// "foo.void = bar";
     /// ```
     NoVoid,
+    eslint,
     restriction,
+    pending // TODO: suggestion
 );
 
 impl Rule for NoVoid {
@@ -63,7 +69,7 @@ impl Rule for NoVoid {
         };
 
         if unary_expr.operator == UnaryOperator::Void {
-            ctx.diagnostic(NoVoidDiagnostic(Span::new(
+            ctx.diagnostic(no_void_diagnostic(Span::new(
                 unary_expr.span.start,
                 unary_expr.span.start + 4,
             )));
@@ -93,5 +99,5 @@ fn test() {
         ("var foo = void 0", Some(serde_json::json!([{ "allowAsStatement": true }]))),
     ];
 
-    Tester::new(NoVoid::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoVoid::NAME, NoVoid::PLUGIN, pass, fail).test_and_snapshot();
 }

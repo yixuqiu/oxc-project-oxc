@@ -1,20 +1,16 @@
 use itertools::Itertools;
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_semantic::{AstNode, AstNodeId, AstNodes};
-use oxc_span::{CompactStr, Span};
+use oxc_semantic::{AstNode, AstNodes, NodeId};
+use oxc_span::Span;
 use oxc_syntax::class::ElementKind;
 
 use crate::{context::LintContext, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-unused-private-class-members): '{0}' is defined but never used.")]
-#[diagnostic(severity(warning))]
-struct NoUnusedPrivateClassMembersDiagnostic(CompactStr, #[label] pub Span);
+fn no_unused_private_class_members_diagnostic(name: &str, span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("'{name}' is defined but never used.")).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoUnusedPrivateClassMembers;
@@ -28,10 +24,10 @@ declare_oxc_lint!(
     ///
     /// Private class members that are declared and not used anywhere in the code are most likely an error due to incomplete refactoring. Such class members take up space in the code and can lead to confusion by readers.
     ///
-    /// ### Example
-    /// ```javascript
+    /// ### Examples
     ///
-    /// /// bad
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// class A {
     ///		#unusedMember = 5;
     ///	}
@@ -58,15 +54,17 @@ declare_oxc_lint!(
     ///			get #unusedAccessor() {}
     ///			set #unusedAccessor(value) {}
     ///	}
+    /// ```
     ///
-    /// /// Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// class A {
     ///		#usedMember = 42;
     ///		method() {
     ///				return this.#usedMember;
     ///		}
     ///	}
-
+    ///
     ///	class B {
     ///			#usedMethod() {
     ///					return 42;
@@ -75,7 +73,7 @@ declare_oxc_lint!(
     ///					return this.#usedMethod();
     ///			}
     ///	}
-
+    ///
     ///	class C {
     ///			get #usedAccessor() {}
     ///			set #usedAccessor(value) {}
@@ -87,6 +85,7 @@ declare_oxc_lint!(
     ///
     /// ```
     NoUnusedPrivateClassMembers,
+    eslint,
     correctness
 );
 
@@ -106,8 +105,8 @@ impl Rule for NoUnusedPrivateClassMembers {
                             && ident.element_ids.contains(&element_id)
                     })
                 {
-                    ctx.diagnostic(NoUnusedPrivateClassMembersDiagnostic(
-                        element.name.clone(),
+                    ctx.diagnostic(no_unused_private_class_members_diagnostic(
+                        &element.name,
                         element.span,
                     ));
                 }
@@ -116,9 +115,9 @@ impl Rule for NoUnusedPrivateClassMembers {
     }
 }
 
-fn is_read(current_node_id: AstNodeId, nodes: &AstNodes) -> bool {
+fn is_read(current_node_id: NodeId, nodes: &AstNodes) -> bool {
     for (curr, parent) in nodes
-        .iter_parents(nodes.parent_id(current_node_id).unwrap_or(current_node_id))
+        .ancestors(nodes.parent_id(current_node_id).unwrap_or(current_node_id))
         .tuple_windows::<(&AstNode<'_>, &AstNode<'_>)>()
     {
         match (curr.kind(), parent.kind()) {
@@ -133,10 +132,12 @@ fn is_read(current_node_id: AstNodeId, nodes: &AstNodes) -> bool {
                 AstKind::ForInStatement(_)
                 | AstKind::ForOfStatement(_)
                 | AstKind::AssignmentTargetWithDefault(_)
-                | AstKind::AssignmentTarget(_),
+                | AstKind::AssignmentTarget(_)
+                | AstKind::ObjectAssignmentTarget(_)
+                | AstKind::ArrayAssignmentTarget(_),
             )
             | (AstKind::SimpleAssignmentTarget(_), AstKind::AssignmentExpression(_)) => {
-                return false
+                return false;
             }
             (AstKind::AssignmentTarget(_), AstKind::AssignmentExpression(_))
             | (_, AstKind::UpdateExpression(_)) => {
@@ -445,5 +446,6 @@ fn test() {
 			}",
     ];
 
-    Tester::new(NoUnusedPrivateClassMembers::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoUnusedPrivateClassMembers::NAME, NoUnusedPrivateClassMembers::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

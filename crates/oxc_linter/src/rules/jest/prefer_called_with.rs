@@ -1,25 +1,24 @@
-use crate::{
-    context::LintContext,
-    rule::Rule,
-    utils::{collect_possible_jest_call_node, parse_expect_jest_fn_call, PossibleJestNode},
-};
-
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-#[derive(Debug, Error, Diagnostic)]
-enum PreferCalledWithDiagnostic {
-    #[error("eslint-plugin-jest(prefer-called-with): Suggest using `toBeCalledWith()` or `toHaveBeenCalledWith()`.")]
-    #[diagnostic(severity(warning), help("Prefer toBeCalledWith(/* expected args */)"))]
-    UseToBeCalledWith(#[label] Span),
-    #[error("eslint-plugin-jest(prefer-called-with): Suggest using `toBeCalledWith()` or `toHaveBeenCalledWith()`.")]
-    #[diagnostic(severity(warning), help("Prefer toHaveBeenCalledWith(/* expected args */)"))]
-    UseHaveBeenCalledWith(#[label] Span),
+use crate::{
+    context::LintContext,
+    rule::Rule,
+    utils::{parse_expect_jest_fn_call, PossibleJestNode},
+};
+
+fn use_to_be_called_with(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using `toBeCalledWith()` or `toHaveBeenCalledWith()`.")
+        .with_help("Prefer toBeCalledWith(/* expected args */)")
+        .with_label(span)
+}
+
+fn use_have_been_called_with(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Suggest using `toBeCalledWith()` or `toHaveBeenCalledWith()`.")
+        .with_help("Prefer toHaveBeenCalledWith(/* expected args */)")
+        .with_label(span)
 }
 
 #[derive(Debug, Default, Clone)]
@@ -45,14 +44,17 @@ declare_oxc_lint!(
     /// ```
     ///
     PreferCalledWith,
+    jest,
     style,
 );
 
 impl Rule for PreferCalledWith {
-    fn run_once(&self, ctx: &LintContext<'_>) {
-        for possible_jest_node in &collect_possible_jest_call_node(ctx) {
-            Self::run(possible_jest_node, ctx);
-        }
+    fn run_on_jest_node<'a, 'c>(
+        &self,
+        jest_node: &PossibleJestNode<'a, 'c>,
+        ctx: &'c LintContext<'a>,
+    ) {
+        Self::run(jest_node, ctx);
     }
 }
 
@@ -78,13 +80,9 @@ impl PreferCalledWith {
         if let Some(matcher_property) = jest_fn_call.matcher() {
             if let Some(matcher_name) = matcher_property.name() {
                 if matcher_name == "toBeCalled" {
-                    ctx.diagnostic(PreferCalledWithDiagnostic::UseToBeCalledWith(
-                        matcher_property.span,
-                    ));
+                    ctx.diagnostic(use_to_be_called_with(matcher_property.span));
                 } else if matcher_name == "toHaveBeenCalled" {
-                    ctx.diagnostic(PreferCalledWithDiagnostic::UseHaveBeenCalledWith(
-                        matcher_property.span,
-                    ));
+                    ctx.diagnostic(use_have_been_called_with(matcher_property.span));
                 }
             }
         }
@@ -117,5 +115,7 @@ fn test() {
         ("expect(fn).toHaveBeenCalled();", None),
     ];
 
-    Tester::new(PreferCalledWith::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    Tester::new(PreferCalledWith::NAME, PreferCalledWith::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

@@ -1,7 +1,4 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use serde::Deserialize;
@@ -14,36 +11,42 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsdoc(no-defaults): Defaults are not permitted.")]
-#[diagnostic(severity(warning), help("{1}"))]
-struct NoDefaultsDiagnostic(#[label] pub Span, String);
+fn no_defaults_diagnostic(span: Span, x1: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Defaults are not permitted.").with_help(x1.to_string()).with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoDefaults(Box<NoDefaultsConfig>);
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// This rule reports defaults being used on the relevant portion of `@param` or `@default`.
     /// It also optionally reports the presence of the square-bracketed optional arguments at all.
     ///
     /// ### Why is this bad?
+    ///
     /// The rule is intended to prevent the indication of defaults on tags
     /// where this would be redundant with ES6 default parameters.
     ///
-    /// ### Example
-    /// ```javascript
-    /// // Passing
-    /// /** @param {number} foo */
-    /// function quux (foo) {}
-    /// /** @param foo */
-    /// function quux (foo) {}
+    /// ### Examples
     ///
-    /// // Failing
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// /** @param {number} [foo="7"] */
     /// function quux (foo) {}
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /** @param {number} foo */
+    /// function quux (foo) {}
+    ///
+    /// /** @param foo */
+    /// function quux (foo) {}
+    /// ```
     NoDefaults,
+    jsdoc,
     correctness
 );
 
@@ -97,13 +100,13 @@ impl Rule for NoDefaults {
                 }
 
                 match (config.no_optional_param_names, name_part.default) {
-                    (true, _) => ctx.diagnostic(NoDefaultsDiagnostic(
+                    (true, _) => ctx.diagnostic(no_defaults_diagnostic(
                         name_part.span,
-                        format!("Optional param names are not permitted on `@{tag_name}` tag."),
+                        &format!("Optional param names are not permitted on `@{tag_name}` tag."),
                     )),
-                    (false, true) => ctx.diagnostic(NoDefaultsDiagnostic(
+                    (false, true) => ctx.diagnostic(no_defaults_diagnostic(
                         name_part.span,
-                        format!("Defaults are not permitted on `@{tag_name}` tag."),
+                        &format!("Defaults are not permitted on `@{tag_name}` tag."),
                     )),
                     (false, false) => {}
                 }
@@ -123,7 +126,7 @@ fn test() {
 			           * @param foo
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      ",
             None,
@@ -135,7 +138,7 @@ fn test() {
 			           * @param {number} foo
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      ",
             None,
@@ -148,7 +151,7 @@ fn test() {
 			           * @param {number} [bar]
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      ",
             None,
@@ -195,7 +198,7 @@ fn test() {
 			           * @param {number} foo
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      ",
             Some(serde_json::json!([
@@ -230,7 +233,7 @@ fn test() {
 			           * @param {number} [foo="7"]
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      "#,
             None,
@@ -243,7 +246,7 @@ fn test() {
 			           * @param {number} [bar = 1]
 			           */
 			          const quux = (foo, bar = 1) => {
-			
+
 			          }
 			      ",
             None,
@@ -256,7 +259,7 @@ fn test() {
 			           * @param {number} [foo="7"]
 			           */
 			          quux (foo) {
-			
+
 			          }
 			      }
 			      "#,
@@ -269,7 +272,7 @@ fn test() {
 			           * @param {number} [foo="7"]
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      "#,
             Some(serde_json::json!([
@@ -285,7 +288,7 @@ fn test() {
 			           * @param {number} [foo]
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      ",
             Some(serde_json::json!([
@@ -301,7 +304,7 @@ fn test() {
 			           * @arg {number} [foo="7"]
 			           */
 			          function quux (foo) {
-			
+
 			          }
 			      "#,
             None,
@@ -403,5 +406,5 @@ fn test() {
         //   ),
     ];
 
-    Tester::new(NoDefaults::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoDefaults::NAME, NoDefaults::PLUGIN, pass, fail).test_and_snapshot();
 }

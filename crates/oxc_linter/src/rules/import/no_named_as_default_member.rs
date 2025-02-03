@@ -1,81 +1,108 @@
-#![allow(clippy::significant_drop_tightening)]
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use dashmap::mapref::one::Ref;
 use oxc_ast::{
     ast::{BindingPatternKind, Expression, IdentifierReference, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_semantic::SymbolId;
-use oxc_span::{CompactStr, Span};
-use oxc_syntax::module_record::ImportImportName;
+use oxc_span::Span;
+use rustc_hash::FxHashMap;
 
-use crate::{context::LintContext, rule::Rule};
+use crate::{context::LintContext, module_record::ImportImportName, rule::Rule};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-import(no-named-as-default-member): {1:?} also has a named export {2:?}")]
-#[diagnostic(severity(warning), help("Check if you meant to write `import {{{2:}}} from {3:?}`"))]
-struct NoNamedAsDefaultMemberDignostic(#[label] pub Span, String, String, String);
+fn no_named_as_default_member_dignostic(
+    span: Span,
+    module_name: &str,
+    export_name: &str,
+    suggested_module_name: &str,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("{module_name:?} also has a named export {export_name:?}"))
+        .with_help(format!("Check if you meant to write `import {{ {export_name} }} from {suggested_module_name:?}`"))
+        .with_label(span)
+}
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/docs/rules/no-named-as-default-member.md>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/no-named-as-default-member.md>
 #[derive(Debug, Default, Clone)]
 pub struct NoNamedAsDefaultMember;
 
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Reports use of an exported name as a property on the default export.
+    /// Reports the use of an exported name (named export) as a property on the
+    /// default export. This occurs when trying to access a named export through
+    /// the default export, which is incorrect.
     ///
-    /// ### Example
+    /// ### Why is this bad?
     ///
+    /// Accessing a named export via the default export is incorrect and will not
+    /// work as expected. Named exports should be imported directly, while default
+    /// exports are accessed without properties. This mistake can lead to runtime
+    /// errors or undefined behavior.
+    ///
+    /// ### Examples
+    ///
+    /// Given
     /// ```javascript
     /// // ./bar.js
     /// export function bar() { return null }
     /// export default () => { return 1 }
+    /// ```
     ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
     /// // ./foo.js
-    /// import bar from './bar'
-    /// const bar = foo.bar // trying to access named export via default
+    /// import foo from './bar'
+    /// const bar = foo.bar; // Incorrect: trying to access named export via default
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// // ./foo.js
+    /// import { bar } from './bar'; // Correct: accessing named export directly
     /// ```
     NoNamedAsDefaultMember,
+    import,
     suspicious
 );
+
 fn get_symbol_id_from_ident(
     ctx: &LintContext<'_>,
     ident: &IdentifierReference,
 ) -> Option<SymbolId> {
-    let reference_id = ident.reference_id.get().unwrap();
-    let reference = &ctx.symbols().references[reference_id];
-    reference.symbol_id()
+    ctx.symbols().get_reference(ident.reference_id()).symbol_id()
 }
 
 impl Rule for NoNamedAsDefaultMember {
     fn run_once(&self, ctx: &LintContext<'_>) {
-        let module_record = ctx.semantic().module_record();
+        let module_record = ctx.module_record();
 
-        let mut has_members_map: HashMap<SymbolId, (Ref<'_, CompactStr, _, _>, CompactStr)> =
-            HashMap::default();
+        let mut has_members_map = FxHashMap::default();
         for import_entry in &module_record.import_entries {
             let ImportImportName::Default(_) = import_entry.import_name else {
                 continue;
             };
 
             let specifier = import_entry.module_request.name();
-            let Some(remote_module_record_ref) = module_record.loaded_modules.get(specifier) else {
+            let remote_module_record = module_record.loaded_modules.read().unwrap();
+            let Some(remote_module_record) = remote_module_record.get(specifier) else {
                 continue;
             };
 
-            if !remote_module_record_ref.exported_bindings.is_empty() {
-                has_members_map.insert(
-                    ctx.symbols().get_symbol_id_from_span(&import_entry.local_name.span()).unwrap(),
-                    (remote_module_record_ref, import_entry.module_request.name().clone()),
-                );
+            if remote_module_record.exported_bindings.is_empty() {
+                continue;
             }
+
+            let Some(symbol_id) = ctx.scopes().get_root_binding(import_entry.local_name.name())
+            else {
+                return;
+            };
+
+            has_members_map.insert(
+                symbol_id,
+                (Arc::clone(remote_module_record), import_entry.module_request.clone()),
+            );
         }
 
         if has_members_map.is_empty() {
@@ -87,7 +114,7 @@ impl Rule for NoNamedAsDefaultMember {
                     .and_then(|symbol_id| has_members_map.get(&symbol_id))
                     .and_then(|it| {
                         if it.0.exported_bindings.contains_key(entry_name) {
-                            Some(it.1.to_string())
+                            Some(&it.1)
                         } else {
                             None
                         }
@@ -102,20 +129,20 @@ impl Rule for NoNamedAsDefaultMember {
                 return;
             };
             if let Some(module_name) = get_external_module_name_if_has_entry(ident, prop_str) {
-                ctx.diagnostic(NoNamedAsDefaultMemberDignostic(
+                ctx.diagnostic(no_named_as_default_member_dignostic(
                     match member_expr {
                         MemberExpression::ComputedMemberExpression(it) => it.span,
                         MemberExpression::StaticMemberExpression(it) => it.span,
                         MemberExpression::PrivateFieldExpression(it) => it.span,
                     },
-                    ident.name.to_string(),
-                    prop_str.to_string(),
-                    module_name,
+                    &ident.name,
+                    prop_str,
+                    module_name.name(),
                 ));
             };
         };
 
-        for item in ctx.semantic().nodes().iter() {
+        for item in ctx.semantic().nodes() {
             match item.kind() {
                 AstKind::MemberExpression(member_expr) => process_member_expr(member_expr),
                 AstKind::VariableDeclarator(decl) => {
@@ -133,11 +160,11 @@ impl Rule for NoNamedAsDefaultMember {
                         if let Some(module_name) =
                             get_external_module_name_if_has_entry(ident, &name)
                         {
-                            ctx.diagnostic(NoNamedAsDefaultMemberDignostic(
+                            ctx.diagnostic(no_named_as_default_member_dignostic(
                                 decl.span,
-                                ident.name.to_string(),
-                                name.to_string(),
-                                module_name,
+                                &ident.name,
+                                &name,
+                                module_name.name(),
                             ));
                         }
                     }
@@ -182,7 +209,7 @@ fn test() {
         r#"import baz from "./named-and-default-export"; const {foo: _foo} = baz"#,
     ];
 
-    Tester::new(NoNamedAsDefaultMember::NAME, pass, fail)
+    Tester::new(NoNamedAsDefaultMember::NAME, NoNamedAsDefaultMember::PLUGIN, pass, fail)
         .change_rule_path("index.js")
         .with_import_plugin(true)
         .test_and_snapshot();

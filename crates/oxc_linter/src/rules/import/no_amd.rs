@@ -1,18 +1,18 @@
-use oxc_ast::ast::{Argument, Expression};
-use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
+use oxc_ast::{
+    ast::{Argument, Expression},
+    AstKind,
 };
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::{CompactStr, Span};
+use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-import(no-amd): Do not use AMD `require` and `define` calls.")]
-#[diagnostic(severity(warning), help("Expected imports instead of AMD {1}()"))]
-struct NoAmdDiagnostic(#[label] pub Span, CompactStr);
+fn no_amd_diagnostic(span: Span, name: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Do not use AMD `require` and `define` calls.")
+        .with_help(format!("Expected imports instead of AMD {name}()"))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoAmd;
@@ -20,22 +20,35 @@ pub struct NoAmd;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Forbid AMD `require` and `define` calls.
+    /// Forbids the use of AMD `require` and `define` calls.
     ///
-    /// ### Example
+    /// ### Why is this bad?
     ///
+    /// AMD (Asynchronous Module Definition) is an older module format
+    /// that is less common in modern JavaScript development, especially
+    /// with the widespread use of ES6 modules and CommonJS in Node.js.
+    /// AMD introduces unnecessary complexity and is often considered outdated.
+    /// This rule enforces the use of more modern module systems to improve
+    /// maintainability and consistency across the codebase.
+    ///
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // fail
     /// require([a, b], function() {} );
-    /// // pass
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// require('../name');
     /// require(`../name`);
     /// ```
     NoAmd,
+    import,
     restriction
 );
 
-/// <https://github.com/import-js/eslint-plugin-import/blob/main/src/rules/no-amd.js>
+/// <https://github.com/import-js/eslint-plugin-import/blob/v2.29.1/docs/rules/no-amd.md>
 impl Rule for NoAmd {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         // not in top level
@@ -43,7 +56,7 @@ impl Rule for NoAmd {
             return;
         }
         if let AstKind::CallExpression(call_expr) = node.kind() {
-            if let Expression::Identifier(ref identifier) = &call_expr.callee {
+            if let Expression::Identifier(identifier) = &call_expr.callee {
                 if identifier.name != "define" && identifier.name != "require" {
                     return;
                 }
@@ -53,10 +66,7 @@ impl Rule for NoAmd {
                 }
 
                 if let Argument::ArrayExpression(_) = call_expr.arguments[0] {
-                    ctx.diagnostic(NoAmdDiagnostic(
-                        identifier.span,
-                        identifier.name.to_compact_str(),
-                    ));
+                    ctx.diagnostic(no_amd_diagnostic(identifier.span, identifier.name.as_str()));
                 }
             }
         }
@@ -103,7 +113,7 @@ fn test() {
         r#"require(["a"], function(a) { console.log(a); })"#,
     ];
 
-    Tester::new(NoAmd::NAME, pass, fail)
+    Tester::new(NoAmd::NAME, NoAmd::PLUGIN, pass, fail)
         .change_rule_path("no-amd.js")
         .with_import_plugin(true)
         .test_and_snapshot();

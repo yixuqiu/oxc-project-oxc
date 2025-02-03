@@ -2,44 +2,68 @@
 use std::cmp::Ordering;
 
 use oxc_ast::{
-    ast::{Expression, NumericLiteral},
+    ast::{Expression, LogicalExpression, NumericLiteral, UnaryOperator},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 
-use crate::{context::LintContext, rule::Rule, utils::is_same_reference, AstNode};
+use crate::{context::LintContext, rule::Rule, utils::is_same_expression, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-enum ConstComparisonsDiagnostic {
-    #[error("oxc(const-comparisons): Left-hand side of `&&` operator has no effect.")]
-    #[diagnostic(severity(warning), help("{2}"))]
-    RedundantLeftHandSide(
-        #[label("If this evaluates to `true`")] Span,
-        #[label("This will always evaluate to true.")] Span,
-        String,
-    ),
-    #[error("oxc(const-comparisons): Right-hand side of `&&` operator has no effect.")]
-    #[diagnostic(severity(warning), help("{2}"))]
-    RedundantRightHandSide(
-        #[label("If this evaluates to `true`")] Span,
-        #[label("This will always evaluate to true.")] Span,
-        String,
-    ),
-    #[error("oxc(const-comparisons): Unexpected constant comparison")]
-    #[diagnostic(severity(warning), help("{4}"))]
-    Impossible(
-        #[label("Requires that {2}")] Span,
-        #[label("Requires that {3}")] Span,
-        String,
-        String,
-        String,
-    ),
+fn redundant_left_hand_side(span: Span, span1: Span, help: String) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Left-hand side of `&&` operator has no effect.")
+        .with_help(help)
+        .with_labels([
+            span.label("If this evaluates to `true`"),
+            span1.label("This will always evaluate to true."),
+        ])
+}
+
+fn redundant_right_hand_side(span: Span, span1: Span, help: String) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Right-hand side of `&&` operator has no effect.")
+        .with_help(help)
+        .with_labels([
+            span.label("If this evaluates to `true`"),
+            span1.label("This will always evaluate to true."),
+        ])
+}
+
+fn impossible(span: Span, span1: Span, x2: &str, x3: &str, x4: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected constant comparison").with_help(x4.to_string()).with_labels([
+        span.label(format!("Requires that {x2}")),
+        span1.label(format!("Requires that {x3}")),
+    ])
+}
+
+fn constant_comparison_diagnostic(span: Span, evaluates_to: bool, help: String) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("This comparison will always evaluate to {evaluates_to}"))
+        .with_help(help)
+        .with_label(span)
+}
+
+fn identical_expressions_logical_operator(left_span: Span, right_span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Both sides of the logical operator are the same")
+                    .with_help("This logical expression will always evaluate to the same value as the expression itself.")
+                    .with_labels([
+                        left_span.label("If this expression evaluates to true"),
+                        right_span
+                            .label("This expression will always evaluate to true"),
+                    ])
+}
+
+fn identical_expressions_logical_operator_negated(
+    always_truthy: bool,
+    left_span: Span,
+    right_span: Span,
+) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected constant comparison")
+        .with_help(format!("This logical expression will always evaluate to {always_truthy}"))
+        .with_labels([
+            left_span.label("If this expression evaluates to true"),
+            right_span.label("This expression will never evaluate to true"),
+        ])
 }
 
 /// <https://rust-lang.github.io/rust-clippy/master/index.html#/impossible>
@@ -50,48 +74,76 @@ pub struct ConstComparisons;
 declare_oxc_lint!(
     /// ### What it does
     ///
-    /// Checks for redundant comparisons between constants:
-    ///  - Checks for ineffective double comparisons against constants.
-    ///  - Checks for impossible comparisons against constants.
+    /// Checks for redundant or logically impossible comparisons. This includes:
+    /// - Ineffective double comparisons against constants.
+    /// - Impossible comparisons involving constants.
+    /// - Redundant comparisons where both operands are the same (e.g., a < a).
     ///
     /// ### Why is this bad?
     ///
-    /// Only one of the comparisons has any effect on the result, the programmer probably intended to flip one of the comparison operators, or compare a different value entirely.
+    /// Such comparisons can lead to confusing or incorrect logic in the program. In many cases:
+    /// - Only one of the comparisons has any effect on the result, suggesting that the programmer might have made a mistake, such as flipping one of the comparison operators or using the wrong variable.
+    /// - Comparisons like a < a or a >= a are always false or true respectively, making the logic redundant and potentially misleading.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// status_code <= 400 && status_code > 500;
     /// status_code < 200 && status_code <= 299;
     /// status_code > 500 && status_code >= 500;
+    /// a < a; // Always false
+    /// a >= a; // Always true
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// status_code >= 400 && status_code < 500;
     /// 500 <= status_code && 600 > status_code;
     /// 500 <= status_code && status_code <= 600;
+    /// a < b;
+    /// a <= b;
     /// ```
     ConstComparisons,
+    oxc,
     correctness
 );
 
 impl Rule for ConstComparisons {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
+        Self::check_logical_expression(node, ctx);
+        Self::check_binary_expression(node, ctx);
+    }
+}
+
+impl ConstComparisons {
+    fn check_logical_expression<'a>(node: &AstNode<'a>, ctx: &LintContext<'a>) {
         let AstKind::LogicalExpression(logical_expr) = node.kind() else {
             return;
         };
 
+        Self::check_logical_expression_const_literal_comparison(logical_expr, ctx);
+        Self::check_redundant_logical_expression(logical_expr, ctx);
+    }
+}
+impl ConstComparisons {
+    // checks for `x < 42 && x < 42` and `x < 42 && x > 42`
+    fn check_logical_expression_const_literal_comparison<'a>(
+        logical_expr: &LogicalExpression<'a>,
+        ctx: &LintContext<'a>,
+    ) {
         if logical_expr.operator != LogicalOperator::And {
             return;
         }
 
         let Some((right_cmp_op, right_expr, right_const_expr, _)) =
-            comparison_to_const(logical_expr.right.without_parenthesized())
+            comparison_to_const(logical_expr.right.get_inner_expression())
         else {
             return;
         };
 
         for (left_cmp_op, left_expr, left_const_expr, left_span) in
-            all_and_comparison_to_const(logical_expr.left.without_parenthesized())
+            all_and_comparison_to_const(logical_expr.left.get_inner_expression())
         {
             let Some(ordering) = left_const_expr.value.partial_cmp(&right_const_expr.value) else {
                 return;
@@ -106,7 +158,7 @@ impl Rule for ConstComparisons {
                 return;
             }
 
-            if !is_same_reference(left_expr, right_expr, ctx) {
+            if !is_same_expression(left_expr, right_expr, ctx) {
                 return;
             }
 
@@ -116,17 +168,9 @@ impl Rule for ConstComparisons {
                 // We already know that either side of `&&` has no effect,
                 // but emit a different error message depending on which side it is
                 if left_side_is_useless(left_cmp_op, ordering) {
-                    ctx.diagnostic(ConstComparisonsDiagnostic::RedundantLeftHandSide(
-                        left_span,
-                        logical_expr.right.span(),
-                        format!("if `{rhs_str}` evaluates to true, `{lhs_str}` will always evaluate to true as well")
-                    ));
+                    ctx.diagnostic(redundant_left_hand_side(left_span, logical_expr.right.span(), format!("if `{rhs_str}` evaluates to true, `{lhs_str}` will always evaluate to true as well")));
                 } else {
-                    ctx.diagnostic(ConstComparisonsDiagnostic::RedundantRightHandSide(
-                        logical_expr.right.span(),
-                        left_span,
-                        format!("if `{lhs_str}` evaluates to true, `{rhs_str}` will always evaluate to true as well")
-                    ));
+                    ctx.diagnostic(redundant_right_hand_side(logical_expr.right.span(), left_span, format!("if `{lhs_str}` evaluates to true, `{rhs_str}` will always evaluate to true as well")));
                 }
             } else if !comparison_is_possible(left_cmp_op.direction(), ordering) {
                 let lhs_str = left_const_expr.span.source_text(ctx.source_text());
@@ -137,31 +181,118 @@ impl Rule for ConstComparisons {
                         "since `{lhs_str}` < `{rhs_str}`, the expression evaluates to false for any value of `{expr_str}`"
                     ),
                     Ordering::Equal => {
-                        format!("`{expr_str}` cannot simultaneously be greater than and less than `{lhs_str}`")
-                    },
+                        format!(
+                            "`{expr_str}` cannot simultaneously be greater than and less than `{lhs_str}`"
+                        )
+                    }
                     Ordering::Greater => format!(
                         "since `{lhs_str}` > `{rhs_str}`, the expression evaluates to false for any value of `{expr_str}`"
                     ),
                 };
 
-                ctx.diagnostic(ConstComparisonsDiagnostic::Impossible(
+                ctx.diagnostic(impossible(
                     left_span,
-                    logical_expr.right.without_parenthesized().span(),
-                    format!(
+                    logical_expr.right.get_inner_expression().span(),
+                    &format!(
                         "`{} {} {}` ",
                         expr_str,
                         left_cmp_op,
                         left_const_expr.span.source_text(ctx.source_text())
                     ),
-                    format!(
+                    &format!(
                         "`{} {} {}` ",
                         expr_str,
                         right_cmp_op,
                         right_const_expr.span.source_text(ctx.source_text())
                     ),
-                    diagnostic_note,
+                    &diagnostic_note,
                 ));
             }
+        }
+    }
+
+    /// checks for:
+    /// ```ts
+    /// a === b && b === a
+    /// a === b && a !== b
+    /// !a && a
+    /// a && !a
+    /// ```
+    fn check_redundant_logical_expression<'a>(
+        logical_expr: &LogicalExpression<'a>,
+        ctx: &LintContext<'a>,
+    ) {
+        if !matches!(logical_expr.operator, LogicalOperator::And | LogicalOperator::Or) {
+            return;
+        }
+
+        if is_same_expression(
+            logical_expr.left.get_inner_expression(),
+            logical_expr.right.get_inner_expression(),
+            ctx,
+        ) {
+            ctx.diagnostic(identical_expressions_logical_operator(
+                logical_expr.left.span(),
+                logical_expr.right.span(),
+            ));
+        }
+
+        // if either are `!foo`, check whether it looks like `foo && !foo` or `foo || !foo`
+        match (logical_expr.left.get_inner_expression(), logical_expr.right.get_inner_expression())
+        {
+            (Expression::UnaryExpression(negated_expr), other_expr)
+            | (other_expr, Expression::UnaryExpression(negated_expr)) => {
+                if negated_expr.operator == UnaryOperator::LogicalNot
+                    && is_same_expression(&negated_expr.argument, other_expr, ctx)
+                {
+                    ctx.diagnostic(identical_expressions_logical_operator_negated(
+                        matches!(logical_expr.operator, LogicalOperator::Or),
+                        logical_expr.left.span(),
+                        logical_expr.right.span(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn check_binary_expression<'a>(node: &AstNode<'a>, ctx: &LintContext<'a>) {
+        let AstKind::BinaryExpression(bin_expr) = node.kind() else {
+            return;
+        };
+
+        if matches!(
+            bin_expr.operator,
+            BinaryOperator::LessEqualThan
+                | BinaryOperator::GreaterEqualThan
+                | BinaryOperator::LessThan
+                | BinaryOperator::GreaterThan
+        ) && is_same_expression(
+            bin_expr.left.get_inner_expression(),
+            bin_expr.right.get_inner_expression(),
+            ctx,
+        ) {
+            let is_const_truthy = matches!(
+                bin_expr.operator,
+                BinaryOperator::LessEqualThan | BinaryOperator::GreaterEqualThan
+            );
+
+            ctx.diagnostic(constant_comparison_diagnostic(
+                bin_expr.span,
+                is_const_truthy,
+                format!(
+                    "Because `{}` will {} be {} itself",
+                    bin_expr.left.span().source_text(ctx.source_text()),
+                    if is_const_truthy { "always" } else { "never" },
+                    match bin_expr.operator {
+                        BinaryOperator::GreaterEqualThan | BinaryOperator::LessEqualThan =>
+                            "equal to",
+                        BinaryOperator::LessThan => "less then",
+                        BinaryOperator::GreaterThan => "greater than",
+                        _ => unreachable!(),
+                    },
+                ),
+            ));
         }
     }
 }
@@ -173,8 +304,7 @@ fn comparison_to_const<'a, 'b>(
 ) -> Option<(CmpOp, &'b Expression<'a>, &'b NumericLiteral<'a>, Span)> {
     if let Expression::BinaryExpression(bin_expr) = expr {
         if let Ok(cmp_op) = CmpOp::try_from(bin_expr.operator) {
-            match (&bin_expr.left.without_parenthesized(), &bin_expr.right.without_parenthesized())
-            {
+            match (&bin_expr.left.get_inner_expression(), &bin_expr.right.get_inner_expression()) {
                 (Expression::NumericLiteral(lit), _) => {
                     return Some((cmp_op.reverse(), &bin_expr.right, lit, bin_expr.span));
                 }
@@ -196,9 +326,8 @@ fn all_and_comparison_to_const<'a, 'b>(
         Expression::LogicalExpression(logical_expr)
             if logical_expr.operator == LogicalOperator::And =>
         {
-            let left_iter = all_and_comparison_to_const(logical_expr.left.without_parenthesized());
-            let right_iter =
-                all_and_comparison_to_const(logical_expr.right.without_parenthesized());
+            let left_iter = all_and_comparison_to_const(logical_expr.left.get_inner_expression());
+            let right_iter = all_and_comparison_to_const(logical_expr.right.get_inner_expression());
             Box::new(left_iter.chain(right_iter))
         }
         _ => {
@@ -322,6 +451,17 @@ fn test() {
         "styleCodes.length >= 5 && styleCodes[2] >= 0",
         "status_code <= 400 || foo() && status_code > 500;",
         "status_code > 500 && foo() && bar || status_code < 400;",
+        // oxc specific
+        "a < b",
+        "a.b.c < b.b.c",
+        "a <= b",
+        "a > b",
+        "a >= b",
+        "class Foo { #a; #b; constructor() { this.#a = 1; }; test() { return this.#a > this.#b } }",
+        "!foo && bar",
+        "!foo && !bar",
+        "foo || bar",
+        "!foo || bar",
     ];
 
     let fail = vec![
@@ -399,7 +539,22 @@ fn test() {
         "status_code <= 500 && response && status_code < 500;",
         // Useless right
         "status_code < 500 && response && status_code <= 500;",
+        // Oxc specific
+        "a < a",
+        "a <= a",
+        "a > a",
+        "a >= a",
+        "a.b.c >= a.b.c",
+        "a == b && a == b",
+        "a == b || a == b",
+        "!foo && !foo",
+        "!foo || !foo",
+        "class Foo { #a; #b; constructor() { this.#a = 1; }; test() { return this.#a > this.#a } }",
+        "!foo && foo",
+        "foo && !foo",
+        "!foo || foo",
+        "foo || !foo",
     ];
 
-    Tester::new(ConstComparisons::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ConstComparisons::NAME, ConstComparisons::PLUGIN, pass, fail).test_and_snapshot();
 }

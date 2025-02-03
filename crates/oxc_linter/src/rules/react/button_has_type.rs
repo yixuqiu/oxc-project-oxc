@@ -5,29 +5,27 @@ use oxc_ast::{
     },
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{
-    context::LintContext,
+    context::{ContextHost, LintContext},
     rule::Rule,
-    utils::{get_prop_value, has_jsx_prop_lowercase, is_create_element_call},
+    utils::{get_prop_value, has_jsx_prop_ignore_case, is_create_element_call},
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-enum ButtonHasTypeDiagnostic {
-    #[error("eslint-plugin-react(button-has-type): `button` elements must have an explicit `type` attribute.")]
-    #[diagnostic(severity(warning), help("Add a `type` attribute to the `button` element."))]
-    MissingTypeProp(#[label] Span),
+fn missing_type_prop(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("`button` elements must have an explicit `type` attribute.")
+        .with_help("Add a `type` attribute to the `button` element.")
+        .with_label(span)
+}
 
-    #[error("eslint-plugin-react(button-has-type): `button` elements must have a valid `type` attribute.")]
-    #[diagnostic(severity(warning), help("Change the `type` attribute to one of the allowed values: `button`, `submit`, or `reset`."))]
-    InvalidTypeProp(#[label] Span),
+fn invalid_type_prop(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("`button` elements must have a valid `type` attribute.")
+        .with_help("Change the `type` attribute to one of the allowed values: `button`, `submit`, or `reset`.")
+        .with_label(span)
 }
 
 #[derive(Debug, Clone)]
@@ -50,19 +48,25 @@ declare_oxc_lint!(
     ///
     /// ### Why is this bad?
     ///
-    /// The default value of `type` attribute for `button` HTML element is `"submit"` which is often not the desired behavior and may lead to unexpected page reloads.
+    /// The default value of `type` attribute for `button` HTML element is
+    /// `"submit"` which is often not the desired behavior and may lead to
+    /// unexpected page reloads.
     ///
     /// ### Example
-    /// ```javascript
-    /// // Bad
+    ///
+    /// Examples of **incorrect** code for this rule:
+    /// ```jsx
     /// <button />
     /// <button type="foo" />
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```jsx
     /// <button type="button" />
     /// <button type="submit" />
     /// ```
     ButtonHasType,
+    react,
     restriction
 );
 
@@ -79,15 +83,13 @@ impl Rule for ButtonHasType {
                     return;
                 }
 
-                has_jsx_prop_lowercase(jsx_el, "type").map_or_else(
+                has_jsx_prop_ignore_case(jsx_el, "type").map_or_else(
                     || {
-                        ctx.diagnostic(ButtonHasTypeDiagnostic::MissingTypeProp(identifier.span));
+                        ctx.diagnostic(missing_type_prop(identifier.span));
                     },
                     |button_type_prop| {
                         if !self.is_valid_button_type_prop(button_type_prop) {
-                            ctx.diagnostic(ButtonHasTypeDiagnostic::InvalidTypeProp(
-                                button_type_prop.span(),
-                            ));
+                            ctx.diagnostic(invalid_type_prop(button_type_prop.span()));
                         }
                     },
                 );
@@ -117,21 +119,17 @@ impl Rule for ButtonHasType {
                             })
                             .map_or_else(
                                 || {
-                                    ctx.diagnostic(ButtonHasTypeDiagnostic::MissingTypeProp(
-                                        obj_expr.span,
-                                    ));
+                                    ctx.diagnostic(missing_type_prop(obj_expr.span));
                                 },
                                 |type_prop| {
                                     if !self.is_valid_button_type_prop_expression(&type_prop.value)
                                     {
-                                        ctx.diagnostic(ButtonHasTypeDiagnostic::InvalidTypeProp(
-                                            type_prop.span,
-                                        ));
+                                        ctx.diagnostic(invalid_type_prop(type_prop.span));
                                     }
                                 },
                             );
                     } else {
-                        ctx.diagnostic(ButtonHasTypeDiagnostic::MissingTypeProp(call_expr.span));
+                        ctx.diagnostic(missing_type_prop(call_expr.span));
                     }
                 }
             }
@@ -154,6 +152,10 @@ impl Rule for ButtonHasType {
                 .unwrap_or(true),
         }
     }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_jsx()
+    }
 }
 
 impl ButtonHasType {
@@ -174,7 +176,7 @@ impl ButtonHasType {
     }
 
     fn is_valid_button_type_prop_expression(&self, expr: &Expression) -> bool {
-        match expr.without_parenthesized() {
+        match expr.without_parentheses() {
             Expression::StringLiteral(str) => {
                 self.is_valid_button_type_prop_string_literal(str.value.as_str())
             }
@@ -253,7 +255,7 @@ fn test() {
 			              },
 			            },
 			          ];
-			
+
 			          return <>
 			            {
 			              buttonProps.map(
@@ -317,5 +319,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(ButtonHasType::NAME, pass, fail).test_and_snapshot();
+    Tester::new(ButtonHasType::NAME, ButtonHasType::PLUGIN, pass, fail).test_and_snapshot();
 }

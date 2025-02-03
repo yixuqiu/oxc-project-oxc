@@ -1,12 +1,19 @@
-use rustc_hash::FxHashMap;
-use serde::Deserialize;
+use std::borrow::Cow;
 
-/// <https://github.com/gajus/eslint-plugin-jsdoc/blob/main/docs/settings.md>
-#[derive(Debug, Deserialize)]
+use rustc_hash::FxHashMap;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::utils::default_true;
+
+// <https://github.com/gajus/eslint-plugin-jsdoc/blob/v50.5.0/docs/settings.md>
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct JSDocPluginSettings {
     /// For all rules but NOT apply to `check-access` and `empty-tags` rule
     #[serde(default, rename = "ignorePrivate")]
     pub ignore_private: bool,
+
     /// For all rules but NOT apply to `empty-tags` rule
     #[serde(default, rename = "ignoreInternal")]
     pub ignore_internal: bool,
@@ -14,12 +21,15 @@ pub struct JSDocPluginSettings {
     /// Only for `require-(yields|returns|description|example|param|throws)` rule
     #[serde(default = "default_true", rename = "ignoreReplacesDocs")]
     pub ignore_replaces_docs: bool,
+
     /// Only for `require-(yields|returns|description|example|param|throws)` rule
     #[serde(default = "default_true", rename = "overrideReplacesDocs")]
     pub override_replaces_docs: bool,
+
     /// Only for `require-(yields|returns|description|example|param|throws)` rule
     #[serde(default, rename = "augmentsExtendsReplacesDocs")]
     pub augments_extends_replaces_docs: bool,
+
     /// Only for `require-(yields|returns|description|example|param|throws)` rule
     #[serde(default, rename = "implementsReplacesDocs")]
     pub implements_replaces_docs: bool,
@@ -90,27 +100,30 @@ impl Default for JSDocPluginSettings {
 impl JSDocPluginSettings {
     /// Only for `check-tag-names` rule
     /// Return `Some(reason)` if blocked
-    pub fn check_blocked_tag_name(&self, tag_name: &str) -> Option<String> {
+    pub fn check_blocked_tag_name(&self, tag_name: &str) -> Option<Cow<str>> {
         match self.tag_name_preference.get(tag_name) {
-            Some(TagNamePreference::FalseOnly(_)) => Some(format!("Unexpected tag `@{tag_name}`.")),
-            Some(TagNamePreference::ObjectWithMessage { message }) => Some(message.to_string()),
+            Some(TagNamePreference::FalseOnly(_)) => {
+                Some(Cow::Owned(format!("Unexpected tag `@{tag_name}`.")))
+            }
+            Some(TagNamePreference::ObjectWithMessage { message }) => Some(Cow::Borrowed(message)),
             _ => None,
         }
     }
+
     /// Only for `check-tag-names` rule
     /// Return `Some(reason)` if replacement found or default aliased
-    pub fn check_preferred_tag_name(&self, original_name: &str) -> Option<String> {
-        let reason = |preferred_name: &str| -> String {
-            format!("Replace tag `@{original_name}` with `@{preferred_name}`.")
+    pub fn check_preferred_tag_name(&self, original_name: &str) -> Option<Cow<str>> {
+        let reason = |preferred_name: &str| -> Cow<str> {
+            Cow::Owned(format!("Replace tag `@{original_name}` with `@{preferred_name}`."))
         };
 
         match self.tag_name_preference.get(original_name) {
             Some(TagNamePreference::TagNameOnly(preferred_name)) => Some(reason(preferred_name)),
             Some(TagNamePreference::ObjectWithMessageAndReplacement { message, .. }) => {
-                Some(message.to_string())
+                Some(Cow::Borrowed(message))
             }
             _ => {
-                // https://github.com/gajus/eslint-plugin-jsdoc/blob/main/docs/settings.md#default-preferred-aliases
+                // https://github.com/gajus/eslint-plugin-jsdoc/blob/v50.5.0/docs/settings.md#default-preferred-aliases
                 let aliased_name = match original_name {
                     "virtual" => "abstract",
                     "extends" => "augments",
@@ -139,6 +152,7 @@ impl JSDocPluginSettings {
             }
         }
     }
+
     /// Only for `check-tag-names` rule
     /// Return all user replacement tag names
     pub fn list_user_defined_tag_names(&self) -> Vec<&str> {
@@ -156,24 +170,19 @@ impl JSDocPluginSettings {
 
     /// Resolve original, known tag name to user preferred name
     /// If not defined, return original name
-    pub fn resolve_tag_name(&self, original_name: &str) -> String {
+    pub fn resolve_tag_name<'s>(&'s self, original_name: &'s str) -> &'s str {
         match self.tag_name_preference.get(original_name) {
             Some(
                 TagNamePreference::TagNameOnly(replacement)
                 | TagNamePreference::ObjectWithMessageAndReplacement { replacement, .. },
-            ) => replacement.to_string(),
-            _ => original_name.to_string(),
+            ) => replacement,
+            _ => original_name,
         }
     }
 }
 
-// Deserialize helper types
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[cfg_attr(test, derive(PartialEq))]
 #[serde(untagged)]
 enum TagNamePreference {
     TagNameOnly(String),
@@ -190,8 +199,11 @@ enum TagNamePreference {
 
 #[cfg(test)]
 mod test {
-    use super::JSDocPluginSettings;
+    use std::borrow::Cow;
+
     use serde::Deserialize;
+
+    use super::JSDocPluginSettings;
 
     #[test]
     fn parse_defaults() {
@@ -286,9 +298,9 @@ mod test {
         .unwrap();
         assert_eq!(
             settings.check_blocked_tag_name("foo"),
-            Some("Unexpected tag `@foo`.".to_string())
+            Some(Cow::Borrowed("Unexpected tag `@foo`."))
         );
-        assert_eq!(settings.check_blocked_tag_name("bar"), Some("do not use bar".to_string()));
+        assert_eq!(settings.check_blocked_tag_name("bar"), Some(Cow::Borrowed("do not use bar")));
         assert_eq!(settings.check_blocked_tag_name("baz"), None);
     }
 
@@ -308,10 +320,10 @@ mod test {
         .unwrap();
         assert_eq!(settings.check_preferred_tag_name("foo"), None,);
         assert_eq!(settings.check_preferred_tag_name("bar"), None);
-        assert_eq!(settings.check_preferred_tag_name("baz"), Some("baz is noop now".to_string()));
+        assert_eq!(settings.check_preferred_tag_name("baz"), Some("baz is noop now".into()));
         assert_eq!(
             settings.check_preferred_tag_name("qux"),
-            Some("Replace tag `@qux` with `@quux`.".to_string())
+            Some("Replace tag `@qux` with `@quux`.".into())
         );
     }
 }

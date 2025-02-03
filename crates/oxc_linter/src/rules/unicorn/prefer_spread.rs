@@ -1,21 +1,20 @@
+use cow_utils::CowUtils;
 use oxc_ast::{
-    ast::{match_member_expression, Expression},
+    ast::{match_member_expression, CallExpression, Expression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::{self, Error},
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use phf::phf_set;
 
-use crate::{context::LintContext, rule::Rule, AstNode, Fix};
+use crate::{ast_util, context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-spread): Prefer the spread operator (`...`) over {1}")]
-#[diagnostic(severity(warning), help("The spread operator (`...`) is more concise and readable."))]
-struct PreferSpreadDiagnostic(#[label] pub Span, pub &'static str);
+fn unicorn_prefer_spread_diagnostic(span: Span, bad_method: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Prefer the spread operator (`...`) over {bad_method}"))
+        .with_help("The spread operator (`...`) is more concise and readable.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferSpread;
@@ -29,138 +28,154 @@ declare_oxc_lint!(
     ///
     /// Using the spread operator is more concise and readable.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // bad
     /// const foo = Array.from(set);
     /// const foo = Array.from(new Set([1, 2]));
+    /// ```
     ///
-    /// // good
-    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// [...set].map(() => {});
+    /// Array.from(...argumentsArray);
     /// ```
     PreferSpread,
-    style
+    unicorn,
+    style,
+    conditional_fix
 );
 
 impl Rule for PreferSpread {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CallExpression(call_expr) = node.kind() else { return };
-
-        let Some(member_expr) = call_expr.callee.without_parenthesized().as_member_expression()
-        else {
+        let AstKind::CallExpression(call_expr) = node.kind() else {
             return;
         };
 
-        let Some(static_property_name) = member_expr.static_property_name() else { return };
+        check_unicorn_prefer_spread(call_expr, ctx);
+    }
+}
 
-        match static_property_name {
-            // `Array.from()`
-            "from" => {
-                if call_expr.arguments.len() != 1 || member_expr.is_computed() {
-                    return;
-                }
+fn check_unicorn_prefer_spread(call_expr: &CallExpression, ctx: &LintContext) {
+    let Some(member_expr) = call_expr.callee.without_parentheses().as_member_expression() else {
+        return;
+    };
 
-                let Some(expr) = call_expr.arguments[0].as_expression() else { return };
-                if matches!(expr.without_parenthesized(), Expression::ObjectExpression(_)) {
-                    return;
-                }
+    let Some(static_property_name) = member_expr.static_property_name() else {
+        return;
+    };
 
-                let Expression::Identifier(ident) = member_expr.object().without_parenthesized()
-                else {
-                    return;
-                };
-
-                if ident.name != "Array" {
-                    return;
-                }
-
-                ctx.diagnostic(PreferSpreadDiagnostic(call_expr.span, "Array.from()"));
+    match static_property_name {
+        // `Array.from()`
+        "from" => {
+            if call_expr.arguments.len() != 1 || member_expr.is_computed() {
+                return;
             }
-            // `array.concat()`
-            "concat" => {
-                if is_not_array(member_expr.object().without_parenthesized()) {
-                    return;
-                }
 
-                ctx.diagnostic(PreferSpreadDiagnostic(call_expr.span, "array.concat()"));
+            let Some(expr) = call_expr.arguments[0].as_expression() else {
+                return;
+            };
+            if matches!(expr.without_parentheses(), Expression::ObjectExpression(_)) {
+                return;
             }
-            // `array.slice()`
-            "slice" => {
-                if call_expr.arguments.len() > 1 {
-                    return;
-                }
 
-                let member_expr_obj = member_expr.object().without_parenthesized();
+            let Expression::Identifier(ident) = member_expr.object().without_parentheses() else {
+                return;
+            };
 
-                if matches!(
-                    member_expr_obj,
-                    Expression::ArrayExpression(_) | Expression::ThisExpression(_)
-                ) {
-                    return;
-                }
-
-                if let Expression::Identifier(ident) = member_expr_obj {
-                    if IGNORED_SLICE_CALLEE.contains(ident.name.as_str()) {
-                        return;
-                    }
-                }
-
-                if let Some(first_arg) = call_expr.arguments.first() {
-                    let Some(first_arg) = first_arg.as_expression() else { return };
-                    if let Expression::NumericLiteral(num_lit) = first_arg.without_parenthesized() {
-                        if num_lit.value != 0.0 {
-                            return;
-                        }
-                    } else {
-                        return;
-                    }
-                }
-
-                ctx.diagnostic(PreferSpreadDiagnostic(call_expr.span, "array.slice()"));
+            if ident.name != "Array" {
+                return;
             }
-            // `array.toSpliced()`
-            "toSpliced" => {
-                if call_expr.arguments.len() != 0 {
-                    return;
-                }
 
-                if matches!(
-                    member_expr.object().without_parenthesized(),
-                    Expression::ArrayExpression(_)
-                ) {
-                    return;
-                }
-
-                ctx.diagnostic(PreferSpreadDiagnostic(call_expr.span, "array.toSpliced()"));
-            }
-            // `string.split()`
-            "split" => {
-                if call_expr.arguments.len() != 1 {
-                    return;
-                }
-
-                let Some(expr) = call_expr.arguments[0].as_expression() else { return };
-                let Expression::StringLiteral(string_lit) = expr.without_parenthesized() else {
-                    return;
-                };
-
-                if string_lit.value != "" {
-                    return;
-                }
-
-                ctx.diagnostic_with_fix(
-                    PreferSpreadDiagnostic(call_expr.span, "string.split()"),
-                    || {
-                        let callee_obj = member_expr.object().without_parenthesized();
-                        Fix::new(
-                            format!("[...{}]", callee_obj.span().source_text(ctx.source_text())),
-                            call_expr.span,
-                        )
-                    },
-                );
-            }
-            _ => {}
+            ctx.diagnostic(unicorn_prefer_spread_diagnostic(call_expr.span, "Array.from()"));
         }
+        // `array.concat()`
+        "concat" => {
+            if is_not_array(member_expr.object().without_parentheses(), ctx) {
+                return;
+            }
+
+            ctx.diagnostic(unicorn_prefer_spread_diagnostic(call_expr.span, "array.concat()"));
+        }
+        // `array.slice()`
+        "slice" => {
+            if call_expr.arguments.len() > 1 {
+                return;
+            }
+
+            let member_expr_obj = member_expr.object().without_parentheses();
+
+            if matches!(
+                member_expr_obj,
+                Expression::ArrayExpression(_) | Expression::ThisExpression(_)
+            ) {
+                return;
+            }
+
+            if let Expression::Identifier(ident) = member_expr_obj {
+                if IGNORED_SLICE_CALLEE.contains(ident.name.as_str()) {
+                    return;
+                }
+            }
+
+            if let Some(first_arg) = call_expr.arguments.first() {
+                let Some(first_arg) = first_arg.as_expression() else {
+                    return;
+                };
+                if let Expression::NumericLiteral(num_lit) = first_arg.without_parentheses() {
+                    if num_lit.value != 0.0 {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            }
+
+            ctx.diagnostic(unicorn_prefer_spread_diagnostic(call_expr.span, "array.slice()"));
+        }
+        // `array.toSpliced()`
+        "toSpliced" => {
+            if call_expr.arguments.len() != 0 {
+                return;
+            }
+
+            if matches!(member_expr.object().without_parentheses(), Expression::ArrayExpression(_))
+            {
+                return;
+            }
+
+            ctx.diagnostic(unicorn_prefer_spread_diagnostic(call_expr.span, "array.toSpliced()"));
+        }
+        // `string.split()`
+        "split" => {
+            if call_expr.arguments.len() != 1 {
+                return;
+            }
+
+            let Some(expr) = call_expr.arguments[0].as_expression() else {
+                return;
+            };
+            let Expression::StringLiteral(string_lit) = expr.without_parentheses() else {
+                return;
+            };
+
+            if string_lit.value != "" {
+                return;
+            }
+
+            ctx.diagnostic_with_fix(
+                unicorn_prefer_spread_diagnostic(call_expr.span, "string.split()"),
+                |fixer| {
+                    let callee_obj = member_expr.object().without_parentheses();
+                    fixer.replace(
+                        call_expr.span,
+                        format!("[...{}]", callee_obj.span().source_text(ctx.source_text())),
+                    )
+                },
+            );
+        }
+        _ => {}
     }
 }
 
@@ -172,9 +187,9 @@ const IGNORED_SLICE_CALLEE: phf::Set<&'static str> = phf_set! {
     "this",
 };
 
-fn is_not_array(expr: &Expression) -> bool {
+fn is_not_array(expr: &Expression, ctx: &LintContext) -> bool {
     if matches!(
-        expr.without_parenthesized(),
+        expr.without_parentheses(),
         Expression::TemplateLiteral(_) | Expression::BinaryExpression(_)
     ) {
         return true;
@@ -184,7 +199,7 @@ fn is_not_array(expr: &Expression) -> bool {
     }
 
     if let Expression::CallExpression(call_expr) = expr {
-        if let Some(member_expr) = call_expr.callee.without_parenthesized().as_member_expression() {
+        if let Some(member_expr) = call_expr.callee.without_parentheses().as_member_expression() {
             if Some("join") == member_expr.static_property_name() && call_expr.arguments.len() < 2 {
                 return true;
             }
@@ -193,8 +208,21 @@ fn is_not_array(expr: &Expression) -> bool {
         return false;
     }
 
-    let ident = match expr.without_parenthesized() {
-        Expression::Identifier(ident) => ident.name.as_str(),
+    let ident = match expr.without_parentheses() {
+        Expression::Identifier(ident) => {
+            if let Some(symbol_id) = ast_util::get_symbol_id_of_variable(ident, ctx) {
+                let symbol_table = ctx.semantic().symbols();
+                let node = ctx.nodes().get_node(symbol_table.get_declaration(symbol_id));
+
+                if let AstKind::VariableDeclarator(variable_declarator) = node.kind() {
+                    if let Some(ref_expr) = &variable_declarator.init {
+                        return is_not_array(ref_expr, ctx);
+                    }
+                }
+            }
+
+            ident.name.as_str()
+        }
         expr @ match_member_expression!(Expression) => {
             if let Some(v) = expr.to_member_expression().static_property_name() {
                 v
@@ -205,7 +233,9 @@ fn is_not_array(expr: &Expression) -> bool {
         _ => return false,
     };
 
-    if ident.starts_with(|c: char| c.is_ascii_uppercase()) && ident.to_ascii_uppercase() != ident {
+    if ident.starts_with(|c: char| c.is_ascii_uppercase())
+        && ident.cow_to_ascii_uppercase() != ident
+    {
         return true;
     }
 
@@ -315,6 +345,8 @@ fn test() {
         r#""".split(string)"#,
         r"string.split()",
         r#"string.notSplit("")"#,
+        r#"const x = "foo"; x.concat(x);"#,
+        r#"const y = "foo"; const x = y; x.concat(x);"#,
     ];
 
     let fail = vec![
@@ -434,5 +466,7 @@ fn test() {
         (r#""foo bar baz".split("")"#, r#"[..."foo bar baz"]"#, None),
     ];
 
-    Tester::new(PreferSpread::NAME, pass, fail).expect_fix(expect_fix).test_and_snapshot();
+    Tester::new(PreferSpread::NAME, PreferSpread::PLUGIN, pass, fail)
+        .expect_fix(expect_fix)
+        .test_and_snapshot();
 }

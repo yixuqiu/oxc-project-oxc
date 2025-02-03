@@ -2,20 +2,20 @@ use oxc_ast::{
     ast::{match_member_expression, CallExpression, Expression, MemberExpression},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-type-error): Prefer throwing a `TypeError` over a generic `Error` after a type checking if-statement")]
-#[diagnostic(severity(warning), help("Change to `throw new TypeError(...)`"))]
-struct PreferTypeErrorDiagnostic(#[label] pub Span);
+fn prefer_type_error_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Prefer throwing a `TypeError` over a generic `Error` after a type checking if-statement",
+    )
+    .with_help("Change to `throw new TypeError(...)`")
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferTypeError;
@@ -30,27 +30,33 @@ declare_oxc_lint!(
     /// Throwing a `TypeError` instead of a generic `Error` after a type checking if-statement is more specific and helps to catch bugs.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// if (Array.isArray(foo)) {
     ///     throw new Error('Expected foo to be an array');
     /// }
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// if (Array.isArray(foo)) {
     ///     throw new TypeError('Expected foo to be an array');
     /// }
     /// ```
     PreferTypeError,
-    pedantic
+    unicorn,
+    pedantic,
+    fix
 );
 
 impl Rule for PreferTypeError {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::ThrowStatement(throw_stmt) = node.kind() else { return };
+        let AstKind::ThrowStatement(throw_stmt) = node.kind() else {
+            return;
+        };
 
-        let Expression::NewExpression(new_expr) = &throw_stmt.argument.without_parenthesized()
-        else {
+        let Expression::NewExpression(new_expr) = &throw_stmt.argument.without_parentheses() else {
             return;
         };
 
@@ -58,20 +64,31 @@ impl Rule for PreferTypeError {
             return;
         }
 
-        let Some(parent) = ctx.nodes().parent_node(node.id()) else { return };
+        let Some(parent) = ctx.nodes().parent_node(node.id()) else {
+            return;
+        };
 
-        let AstKind::BlockStatement(block_stmt) = parent.kind() else { return };
+        let AstKind::BlockStatement(block_stmt) = parent.kind() else {
+            return;
+        };
 
         if block_stmt.body.len() != 1 {
             return;
         }
 
-        let Some(parent) = ctx.nodes().parent_node(parent.id()) else { return };
+        let Some(parent) = ctx.nodes().parent_node(parent.id()) else {
+            return;
+        };
 
-        let AstKind::IfStatement(if_stmt) = parent.kind() else { return };
+        let AstKind::IfStatement(if_stmt) = parent.kind() else {
+            return;
+        };
 
         if is_type_checking_expr(&if_stmt.test) {
-            ctx.diagnostic(PreferTypeErrorDiagnostic(new_expr.callee.span()));
+            ctx.diagnostic_with_fix(
+                prefer_type_error_diagnostic(new_expr.callee.span()),
+                |fixer| fixer.replace(new_expr.callee.span(), "TypeError"),
+            );
         }
     }
 }
@@ -457,5 +474,58 @@ fn test() {
         ",
     ];
 
-    Tester::new(PreferTypeError::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (
+            r"if (!isFinite(foo)) { throw new Error(); }",
+            r"if (!isFinite(foo)) { throw new TypeError(); }",
+        ),
+        (
+            r"if (isNaN(foo) === false) { throw new Error(); }",
+            r"if (isNaN(foo) === false) { throw new TypeError(); }",
+        ),
+        (
+            r"if (Array.isArray(foo)) { throw new Error('foo is an Array'); }",
+            r"if (Array.isArray(foo)) { throw new TypeError('foo is an Array'); }",
+        ),
+        (
+            r"if (foo instanceof bar) { throw new Error(foobar); }",
+            r"if (foo instanceof bar) { throw new TypeError(foobar); }",
+        ),
+        (
+            r"if (_.isElement(foo)) { throw new Error(); }",
+            r"if (_.isElement(foo)) { throw new TypeError(); }",
+        ),
+        (
+            r"if (_.isElement(foo)) { throw new Error; }",
+            r"if (_.isElement(foo)) { throw new TypeError; }",
+        ),
+        (
+            r"if (wrapper._.isElement(foo)) { throw new Error; }",
+            r"if (wrapper._.isElement(foo)) { throw new TypeError; }",
+        ),
+        (
+            r"if (typeof foo == 'Foo' || 'Foo' === typeof foo) { throw new Error(); }",
+            r"if (typeof foo == 'Foo' || 'Foo' === typeof foo) { throw new TypeError(); }",
+        ),
+        (
+            r"if (Number.isFinite(foo) && Number.isSafeInteger(foo) && Number.isInteger(foo)) { throw new Error(); }",
+            r"if (Number.isFinite(foo) && Number.isSafeInteger(foo) && Number.isInteger(foo)) { throw new TypeError(); }",
+        ),
+        (
+            r"if (wrapper.n.isFinite(foo) && wrapper.n.isSafeInteger(foo) && wrapper.n.isInteger(foo)) { throw new Error(); }",
+            r"if (wrapper.n.isFinite(foo) && wrapper.n.isSafeInteger(foo) && wrapper.n.isInteger(foo)) { throw new TypeError(); }",
+        ),
+        (
+            r"if (wrapper.f.g.n.isFinite(foo) && wrapper.g.n.isSafeInteger(foo) && wrapper.n.isInteger(foo)) { throw new Error(); }",
+            r"if (wrapper.f.g.n.isFinite(foo) && wrapper.g.n.isSafeInteger(foo) && wrapper.n.isInteger(foo)) { throw new TypeError(); }",
+        ),
+        (
+            r"if (_.isElement(foo)) { throw (new Error()); }",
+            r"if (_.isElement(foo)) { throw (new TypeError()); }",
+        ),
+    ];
+
+    Tester::new(PreferTypeError::NAME, PreferTypeError::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

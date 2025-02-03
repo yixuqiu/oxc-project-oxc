@@ -2,19 +2,16 @@ use oxc_ast::{
     ast::{BindingPattern, BindingPatternKind},
     AstKind,
 };
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::{GetSpan, Span};
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-optional-catch-binding): Prefer omitting the catch binding parameter if it is unused")]
-#[diagnostic(severity(warning))]
-struct PreferOptionalCatchBindingDiagnostic(#[label] pub Span);
+fn prefer_optional_catch_binding_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prefer omitting the catch binding parameter if it is unused")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferOptionalCatchBinding;
@@ -29,36 +26,67 @@ declare_oxc_lint!(
     /// It is unnecessary to bind the error to a variable if it is not used.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// try {
     ///  // ...
     /// } catch (e) { }
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// try {
     ///  // ...
     /// } catch { }
     /// ```
     PreferOptionalCatchBinding,
-    style
+    unicorn,
+    style,
+    fix
 );
 
 impl Rule for PreferOptionalCatchBinding {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
-        let AstKind::CatchParameter(catch_param) = node.kind() else { return };
+        let AstKind::CatchParameter(catch_param) = node.kind() else {
+            return;
+        };
         let references_count = get_param_references_count(&catch_param.pattern, ctx);
         if references_count != 0 {
             return;
         }
-        ctx.diagnostic(PreferOptionalCatchBindingDiagnostic(catch_param.pattern.span()));
+        let Some(parent_node) = ctx.nodes().parent_node(node.id()) else {
+            return;
+        };
+        let AstKind::CatchClause(catch_clause) = parent_node.kind() else {
+            return;
+        };
+        ctx.diagnostic_with_fix(
+            prefer_optional_catch_binding_diagnostic(catch_param.pattern.span()),
+            |fixer| {
+                let mut start = catch_clause.span().start + 5;
+                let total_param = Span::new(start, catch_param.span().start);
+                let total_param_value = ctx.source_range(total_param);
+                let plus_space: u32 = total_param_value
+                    .as_bytes()
+                    .iter()
+                    .position(|x| !x.is_ascii_whitespace())
+                    .unwrap_or(0)
+                    .try_into()
+                    .unwrap();
+                start += plus_space;
+                let end = catch_clause.body.span().start;
+                let span = Span::new(start, end);
+                fixer.delete(&span)
+            },
+        );
     }
 }
 
 fn get_param_references_count(binding_pat: &BindingPattern, ctx: &LintContext) -> usize {
     match &binding_pat.kind {
         BindingPatternKind::BindingIdentifier(binding_ident) => {
-            ctx.semantic().symbol_references(binding_ident.symbol_id.get().unwrap()).count()
+            ctx.semantic().symbol_references(binding_ident.symbol_id()).count()
         }
         BindingPatternKind::ObjectPattern(object_pat) => {
             let mut count = 0;
@@ -110,5 +138,23 @@ fn test() {
         r"try {} catch ({cause: {message}}) {}",
     ];
 
-    Tester::new(PreferOptionalCatchBinding::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        (r"try {} catch (_) {}", r"try {} catch {}"),
+        (r"try {} catch (theRealErrorName) {}", r"try {} catch {}"),
+        (
+            r"try    {    } catch    (e)
+			  	  {    }",
+            r"try    {    } catch    {    }",
+        ),
+        (r"try {} catch(e) {}", r"try {} catch{}"),
+        (r"try {} catch (e){}", r"try {} catch {}"),
+        (r"try {} catch ({}) {}", r"try {} catch {}"),
+        (r"try {} catch ({message}) {}", r"try {} catch {}"),
+        (r"try {} catch ({message: notUsedMessage}) {}", r"try {} catch {}"),
+        (r"try {} catch ({cause: {message}}) {}", r"try {} catch {}"),
+    ];
+
+    Tester::new(PreferOptionalCatchBinding::NAME, PreferOptionalCatchBinding::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

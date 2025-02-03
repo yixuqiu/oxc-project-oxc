@@ -1,28 +1,23 @@
 use oxc_ast::AstKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
+use oxc_span::{CompactStr, Span};
 use oxc_syntax::operator::BinaryOperator;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-bitwise): Unexpected use of {0:?}")]
-#[diagnostic(
-    severity(warning),
-    help("bitwise operators are not allowed, maybe you mistyped `&&` or `||`")
-)]
-struct NoBitwiseDiagnostic(&'static str, #[label] pub Span);
+fn no_bitwise_diagnostic(x0: &str, span1: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(format!("Unexpected use of {x0:?}"))
+        .with_help("bitwise operators are not allowed, maybe you mistyped `&&` or `||`")
+        .with_label(span1)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoBitwise(Box<NoBitwiseConfig>);
 
 #[derive(Debug, Default, Clone)]
 pub struct NoBitwiseConfig {
-    allow: Vec<String>,
+    allow: Vec<CompactStr>,
     int32_hint: bool,
 }
 
@@ -50,6 +45,7 @@ declare_oxc_lint!(
     /// var x = y | z;
     /// ```
     NoBitwise,
+    eslint,
     restriction
 );
 
@@ -62,10 +58,7 @@ impl Rule for NoBitwise {
                 .and_then(|v| v.get("allow"))
                 .and_then(serde_json::Value::as_array)
                 .map(|v| {
-                    v.iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(ToString::to_string)
-                        .collect()
+                    v.iter().filter_map(serde_json::Value::as_str).map(CompactStr::from).collect()
                 })
                 .unwrap_or_default(),
             int32_hint: obj
@@ -84,7 +77,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, bin_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, bin_expr.span));
                 }
             }
             AstKind::UnaryExpression(unary_expr) => {
@@ -94,7 +87,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, unary_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, unary_expr.span));
                 }
             }
             AstKind::AssignmentExpression(assign_expr) => {
@@ -104,7 +97,7 @@ impl Rule for NoBitwise {
                     && !allowed_operator(&self.allow, op)
                     && !is_int32_hint(self.int32_hint, node)
                 {
-                    ctx.diagnostic(NoBitwiseDiagnostic(op, assign_expr.span));
+                    ctx.diagnostic(no_bitwise_diagnostic(op, assign_expr.span));
                 }
             }
             _ => {}
@@ -112,7 +105,7 @@ impl Rule for NoBitwise {
     }
 }
 
-fn allowed_operator(allow: &[String], operator: &str) -> bool {
+fn allowed_operator(allow: &[CompactStr], operator: &str) -> bool {
     allow.iter().any(|s| s == operator)
 }
 
@@ -166,5 +159,5 @@ fn test() {
         ("a >>>= b", None),
     ];
 
-    Tester::new(NoBitwise::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoBitwise::NAME, NoBitwise::PLUGIN, pass, fail).test_and_snapshot();
 }

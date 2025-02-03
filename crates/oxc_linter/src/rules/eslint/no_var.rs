@@ -1,29 +1,33 @@
-use oxc_ast::{ast::VariableDeclarationKind, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
+use oxc_ast::{
+    ast::{BindingPattern, BindingPatternKind, VariableDeclarationKind},
+    AstKind,
 };
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint(no-var): Unexpected var, use let or const instead.")]
-#[diagnostic(severity(warning), help("Replace var with let or const"))]
-struct NoVarDiagnostic(#[label] pub Span);
+fn no_var_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected var, use let or const instead.")
+        .with_help("Replace var with let or const")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoVar;
 
-// doc: https://github.com/eslint/eslint/blob/main/docs/src/rules/no-var.md
-// code: https://github.com/eslint/eslint/blob/main/lib/rules/no-var.js
-// test: https://github.com/eslint/eslint/blob/main/tests/lib/rules/no-var.js
+// doc: https://github.com/eslint/eslint/blob/v9.9.1/docs/src/rules/no-var.md
+// code: https://github.com/eslint/eslint/blob/v9.9.1/lib/rules/no-var.js
+// test: https://github.com/eslint/eslint/blob/v9.9.1/tests/lib/rules/no-var.js
 
 declare_oxc_lint!(
     /// ### What it does
-    /// ECMAScript 6 allows programmers to create variables with block scope instead of function scope using the `let` and `const` keywords.
-    /// Block scope is common in many other programming languages and helps programmers avoid mistakes
+    ///
+    /// ECMAScript 6 allows programmers to create variables with block scope
+    /// instead of function scope using the `let` and `const` keywords.  Block
+    /// scope is common in many other programming languages and helps
+    /// programmers avoid mistakes.
     ///
     /// ### Why is this bad?
     /// Using `var` in an es6 environment triggers this error
@@ -39,16 +43,56 @@ declare_oxc_lint!(
     /// const CONFIG = {};
     /// ```
     NoVar,
-    restriction
+    eslint,
+    restriction,
+    fix
 );
 
 impl Rule for NoVar {
     fn run<'a>(&self, node: &AstNode<'a>, ctx: &LintContext<'a>) {
         if let AstKind::VariableDeclaration(dec) = node.kind() {
             if dec.kind == VariableDeclarationKind::Var {
-                ctx.diagnostic(NoVarDiagnostic(Span::new(dec.span.start, dec.span.start + 3)));
+                let is_written_to = dec.declarations.iter().any(|v| is_written_to(&v.id, ctx));
+
+                ctx.diagnostic_with_fix(
+                    no_var_diagnostic(Span::new(dec.span.start, dec.span.start + 3)),
+                    |fixer| {
+                        fixer.replace(
+                            Span::new(dec.span.start, dec.span.start + 3),
+                            if is_written_to { "let" } else { "const" },
+                        )
+                    },
+                );
             }
         }
+    }
+}
+
+fn is_written_to(binding_pat: &BindingPattern, ctx: &LintContext) -> bool {
+    match &binding_pat.kind {
+        BindingPatternKind::BindingIdentifier(binding_ident) => ctx
+            .semantic()
+            .symbol_references(binding_ident.symbol_id())
+            .any(oxc_semantic::Reference::is_write),
+        BindingPatternKind::ObjectPattern(object_pat) => {
+            if object_pat.properties.iter().any(|prop| is_written_to(&prop.value, ctx)) {
+                return true;
+            }
+
+            if let Some(rest) = &object_pat.rest {
+                is_written_to(&rest.argument, ctx)
+            } else {
+                false
+            }
+        }
+        BindingPatternKind::AssignmentPattern(_) => true,
+        BindingPatternKind::ArrayPattern(array_pat) => array_pat.elements.iter().any(|elem| {
+            if let Some(elem) = elem {
+                is_written_to(elem, ctx)
+            } else {
+                false
+            }
+        }),
     }
 }
 
@@ -107,5 +151,13 @@ fn test() {
         ("var bar = function () { foo(); }; var foo = function() {};", None),
     ];
 
-    Tester::new(NoVar::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("var foo", "const foo"),
+        ("var foo; foo += 1", "let foo; foo += 1"),
+        ("var foo,bar; bar = 'que'", "let foo,bar; bar = 'que'"),
+        ("var { a } = {}; a = fn()", "let { a } = {}; a = fn()"),
+        ("var { a } = {}; let b = a", "const { a } = {}; let b = a"),
+    ];
+
+    Tester::new(NoVar::NAME, NoVar::PLUGIN, pass, fail).expect_fix(fix).test_and_snapshot();
 }

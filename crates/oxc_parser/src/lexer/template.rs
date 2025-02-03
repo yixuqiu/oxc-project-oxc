@@ -1,22 +1,22 @@
+use std::cmp::max;
+
+use oxc_allocator::String;
+
+use crate::diagnostics;
+
 use super::{
     cold_branch,
     search::{byte_search, safe_byte_match_table, SafeByteMatchTable},
     Kind, Lexer, SourcePosition, Token,
 };
-use crate::diagnostics;
-
-use std::cmp::max;
-
-use oxc_allocator::String;
 
 const MIN_ESCAPED_TEMPLATE_LIT_LEN: usize = 16;
 
 static TEMPLATE_LITERAL_TABLE: SafeByteMatchTable =
     safe_byte_match_table!(|b| matches!(b, b'$' | b'`' | b'\r' | b'\\'));
 
+/// 12.8.6 Template Literal Lexical Components
 impl<'a> Lexer<'a> {
-    /// 12.8.6 Template Literal Lexical Components
-
     /// Read template literal component.
     ///
     /// This function handles the common case where template contains no escapes or `\r` characters
@@ -40,7 +40,7 @@ impl<'a> Lexer<'a> {
                             if unsafe { after_dollar.read() } == b'{' {
                                 // Skip `${` and stop searching.
                                 // SAFETY: Consuming `${` leaves `pos` on a UTF-8 char boundary.
-                                pos = unsafe { after_dollar.add(1) };
+                                pos = unsafe { pos.add(2) };
                                 false
                             } else {
                                 // Not `${`. Continue searching.
@@ -74,7 +74,7 @@ impl<'a> Lexer<'a> {
                 }
             },
             handle_eof: {
-                self.error(diagnostics::UnterminatedString(self.unterminated_range()));
+                self.error(diagnostics::unterminated_string(self.unterminated_range()));
                 return Kind::Undetermined;
             },
         };
@@ -87,6 +87,7 @@ impl<'a> Lexer<'a> {
     /// # SAFETY
     /// * Byte at `pos` must be `\r`.
     /// * `pos` must not be before `self.source.position()`.
+    #[expect(clippy::unnecessary_safety_comment)]
     unsafe fn template_literal_carriage_return(
         &mut self,
         mut pos: SourcePosition<'a>,
@@ -105,7 +106,7 @@ impl<'a> Lexer<'a> {
         if pos.addr() == self.source.end_addr() {
             return cold_branch(|| {
                 self.source.advance_to_end();
-                self.error(diagnostics::UnterminatedString(self.unterminated_range()));
+                self.error(diagnostics::unterminated_string(self.unterminated_range()));
                 Kind::Undetermined
             });
         }
@@ -129,6 +130,7 @@ impl<'a> Lexer<'a> {
     /// # SAFETY
     /// * Byte at `pos` must be `\`.
     /// * `pos` must not be before `self.source.position()`.
+    #[expect(clippy::unnecessary_safety_comment)]
     unsafe fn template_literal_backslash(
         &mut self,
         pos: SourcePosition<'a>,
@@ -164,7 +166,8 @@ impl<'a> Lexer<'a> {
     /// Create arena string for modified template literal, containing the template literal up to `pos`.
     /// # SAFETY
     /// `pos` must not be before `self.source.position()`
-    unsafe fn template_literal_create_string(&self, pos: SourcePosition) -> String<'a> {
+    #[expect(clippy::unnecessary_safety_comment)]
+    unsafe fn template_literal_create_string(&self, pos: SourcePosition<'a>) -> String<'a> {
         // Create arena string to hold modified template literal.
         // We don't know how long template literal will end up being. Take a guess that total length
         // will be double what we've seen so far, or `MIN_ESCAPED_TEMPLATE_LIT_LEN` minimum.
@@ -212,7 +215,7 @@ impl<'a> Lexer<'a> {
 
                             // Skip `${` and stop searching.
                             // SAFETY: Consuming `${` leaves `pos` on a UTF-8 char boundary.
-                            pos = after_dollar.add(1);
+                            pos = pos.add(2);
                             false
                         } else {
                             // Not `${`. Continue searching.
@@ -295,7 +298,7 @@ impl<'a> Lexer<'a> {
                 }
             },
             handle_eof: {
-                self.error(diagnostics::UnterminatedString(self.unterminated_range()));
+                self.error(diagnostics::unterminated_string(self.unterminated_range()));
                 return Kind::Undetermined;
             },
         };

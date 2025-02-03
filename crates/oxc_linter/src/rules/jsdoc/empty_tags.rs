@@ -1,7 +1,4 @@
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use phf::phf_set;
@@ -9,16 +6,18 @@ use serde::Deserialize;
 
 use crate::{context::LintContext, rule::Rule, utils::should_ignore_as_private};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-jsdoc(empty-tags): Expects the void tags to be empty of any content.")]
-#[diagnostic(severity(warning), help("`@{1}` tag should not have body."))]
-struct EmptyTagsDiagnostic(#[label] Span, String);
+fn empty_tags_diagnostic(span: Span, x1: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Expects the void tags to be empty of any content.")
+        .with_help(format!("`@{x1}` tag should not have body."))
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct EmptyTags(Box<EmptyTagsConfig>);
 
 declare_oxc_lint!(
     /// ### What it does
+    ///
     /// Expects the following tags to be empty of any content:
     /// - `@abstract`
     /// - `@async`
@@ -40,21 +39,26 @@ declare_oxc_lint!(
     /// - `@static`
     ///
     /// ### Why is this bad?
+    ///
     /// The void tags should be empty.
     ///
-    /// ### Example
+    /// ### Examples
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Passing
-    /// /** @async */
-    ///
-    /// /** @private */
-    ///
-    /// // Failing
     /// /** @async foo */
     ///
     /// /** @private bar */
     /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
+    /// /** @async */
+    ///
+    /// /** @private */
+    /// ```
     EmptyTags,
+    jsdoc,
     restriction
 );
 
@@ -125,10 +129,7 @@ impl Rule for EmptyTags {
                     continue;
                 }
 
-                ctx.diagnostic(EmptyTagsDiagnostic(
-                    comment.span_trimmed_first_line(),
-                    tag_name.to_string(),
-                ));
+                ctx.diagnostic(empty_tags_diagnostic(comment.span_trimmed_first_line(), tag_name));
             }
         }
     }
@@ -145,7 +146,7 @@ fn test() {
 			           * @abstract
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -157,7 +158,7 @@ fn test() {
 			           *
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -169,7 +170,7 @@ fn test() {
 			           * @param aName
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -183,7 +184,7 @@ fn test() {
 			           * @async
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -211,7 +212,7 @@ fn test() {
 			       * @private
 			       */
 			      function quux () {
-			
+
 			      }
 			      ",
             None,
@@ -223,7 +224,7 @@ fn test() {
 			       * @internal
 			       */
 			      function quux () {
-			
+
 			      }
 			      ",
             None,
@@ -254,7 +255,7 @@ fn test() {
 			           * @abstract extra text
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -280,7 +281,7 @@ fn test() {
 			           * @abstract extra text
 			           */
 			          quux () {
-			
+
 			          }
 			      }
 			      ",
@@ -295,7 +296,7 @@ fn test() {
 			           * @async out of place
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             None,
@@ -307,7 +308,7 @@ fn test() {
 			           * @event anEvent
 			           */
 			          function quux () {
-			
+
 			          }
 			      ",
             Some(serde_json::json!([
@@ -326,7 +327,7 @@ fn test() {
 			       * bar
 			       */
 			      function quux () {
-			
+
 			      }
 			      ",
             None,
@@ -339,7 +340,7 @@ fn test() {
                    * foo
 			       */
 			      function quux () {
-			
+
 			      }
 			      ",
             None,
@@ -351,7 +352,7 @@ fn test() {
 			       * @private {someType}
 			       */
 			      function quux () {
-			
+
 			      }
 			      ",
             None,
@@ -363,5 +364,5 @@ fn test() {
         ),
     ];
 
-    Tester::new(EmptyTags::NAME, pass, fail).test_and_snapshot();
+    Tester::new(EmptyTags::NAME, EmptyTags::PLUGIN, pass, fail).test_and_snapshot();
 }

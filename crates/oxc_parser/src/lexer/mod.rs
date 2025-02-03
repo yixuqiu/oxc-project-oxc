@@ -1,12 +1,20 @@
-#![allow(clippy::unnecessary_safety_comment)]
-#![allow(unsafe_code)]
-
 //! An Ecma-262 Lexer / Tokenizer
 //! Prior Arts:
-//!     * [jsparagus](https://github.com/mozilla-spidermonkey/jsparagus/blob/master/crates/parser/src)
-//!     * [rome](https://github.com/rome/tools/tree/main/crates/rome_js_parser/src/lexer)
-//!     * [rustc](https://github.com/rust-lang/rust/blob/master/compiler/rustc_lexer/src)
+//!     * [jsparagus](https://github.com/mozilla-spidermonkey/jsparagus/blob/24004745a8ed4939fc0dc7332bfd1268ac52285f/crates/parser/src)
+//!     * [rome](https://github.com/rome/tools/tree/lsp/v0.28.0/crates/rome_js_parser/src/lexer)
+//!     * [rustc](https://github.com/rust-lang/rust/blob/1.82.0/compiler/rustc_lexer/src)
 //!     * [v8](https://v8.dev/blog/scanner)
+
+use std::collections::VecDeque;
+
+use rustc_hash::FxHashMap;
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::RegExpFlags;
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_span::{SourceType, Span};
+
+use crate::{diagnostics, UniquePromise};
 
 mod byte_handlers;
 mod comment;
@@ -27,25 +35,12 @@ mod typescript;
 mod unicode;
 mod whitespace;
 
-use rustc_hash::FxHashMap;
-use std::collections::VecDeque;
+pub use kind::Kind;
+pub use number::{parse_big_int, parse_float, parse_int};
+pub use token::Token;
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::RegExpFlags;
-use oxc_diagnostics::Error;
-use oxc_span::{SourceType, Span};
-
-use self::{
-    byte_handlers::handle_byte,
-    source::{Source, SourcePosition},
-    trivia_builder::TriviaBuilder,
-};
-pub use self::{
-    kind::Kind,
-    number::{parse_big_int, parse_float, parse_int},
-    token::Token,
-};
-use crate::{diagnostics, UniquePromise};
+use source::{Source, SourcePosition};
+use trivia_builder::TriviaBuilder;
 
 #[derive(Debug, Clone, Copy)]
 pub struct LexerCheckpoint<'a> {
@@ -80,7 +75,7 @@ pub struct Lexer<'a> {
 
     token: Token,
 
-    pub(crate) errors: Vec<Error>,
+    pub(crate) errors: Vec<OxcDiagnostic>,
 
     lookahead: VecDeque<Lookahead<'a>>,
 
@@ -99,7 +94,6 @@ pub struct Lexer<'a> {
     multi_line_comment_end_finder: Option<memchr::memmem::Finder<'static>>,
 }
 
-#[allow(clippy::unused_self)]
 impl<'a> Lexer<'a> {
     /// Create new `Lexer`.
     ///
@@ -138,8 +132,15 @@ impl<'a> Lexer<'a> {
         source_text: &'a str,
         source_type: SourceType,
     ) -> Self {
-        let unique = UniquePromise::new_for_tests();
+        let unique = UniquePromise::new_for_benchmarks();
         Self::new(allocator, source_text, source_type, unique)
+    }
+
+    /// Get errors.
+    /// Only used in benchmarks.
+    #[cfg(feature = "benchmarking")]
+    pub fn errors(&self) -> &[OxcDiagnostic] {
+        &self.errors
     }
 
     /// Remaining string from `Source`
@@ -170,8 +171,8 @@ impl<'a> Lexer<'a> {
         let n = n as usize;
         debug_assert!(n > 0);
 
-        if self.lookahead.len() > n - 1 {
-            return self.lookahead[n - 1].token;
+        if let Some(lookahead) = self.lookahead.get(n - 1) {
+            return lookahead.token;
         }
 
         let position = self.source.position();
@@ -218,18 +219,18 @@ impl<'a> Lexer<'a> {
         self.token.end = self.offset();
         debug_assert!(self.token.start <= self.token.end);
         let token = self.token;
+        self.trivia_builder.handle_token(token);
         self.token = Token::default();
         token
     }
 
     // ---------- Private Methods ---------- //
-    fn error<T: Into<Error>>(&mut self, error: T) {
-        self.errors.push(error.into());
+    fn error(&mut self, error: OxcDiagnostic) {
+        self.errors.push(error);
     }
 
     /// Get the length offset from the source, in UTF-8 bytes
     #[inline]
-    #[allow(clippy::cast_possible_truncation)]
     fn offset(&self) -> u32 {
         self.source.offset()
     }
@@ -251,26 +252,47 @@ impl<'a> Lexer<'a> {
         self.source.next_char().unwrap()
     }
 
+    /// Consume the current char and the next if not at EOF
+    #[inline]
+    fn next_2_chars(&mut self) -> Option<[char; 2]> {
+        self.source.next_2_chars()
+    }
+
+    /// Consume the current char and the next
+    #[inline]
+    fn consume_2_chars(&mut self) -> [char; 2] {
+        self.next_2_chars().unwrap()
+    }
+
+    /// Peek the next byte without advancing the position
+    #[inline]
+    fn peek_byte(&self) -> Option<u8> {
+        self.source.peek_byte()
+    }
+
+    /// Peek the next two bytes without advancing the position
+    #[inline]
+    fn peek_2_bytes(&self) -> Option<[u8; 2]> {
+        self.source.peek_2_bytes()
+    }
+
     /// Peek the next char without advancing the position
     #[inline]
-    fn peek(&self) -> Option<char> {
+    fn peek_char(&self) -> Option<char> {
         self.source.peek_char()
     }
 
-    /// Peek the next next char without advancing the position
-    #[inline]
-    fn peek2(&self) -> Option<char> {
-        self.source.peek_char2()
-    }
-
-    /// Peek the next character, and advance the current position if it matches
-    #[inline]
-    fn next_eq(&mut self, c: char) -> bool {
-        let matched = self.peek() == Some(c);
-        if matched {
-            self.source.next_char().unwrap();
-        }
-        matched
+    /// Peek the next byte, and advance the current position if it matches
+    /// the given ASCII char.
+    // `#[inline(always)]` to make sure the `assert!` gets optimized out.
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn next_ascii_byte_eq(&mut self, b: u8) -> bool {
+        // TODO: can be replaced by `std::ascii:Char` once stabilized.
+        // https://github.com/rust-lang/rust/issues/110998
+        assert!(b.is_ascii());
+        // SAFETY: `b` is a valid ASCII char.
+        unsafe { self.source.advance_if_ascii_eq(b) }
     }
 
     fn current_offset(&self) -> Span {
@@ -281,9 +303,9 @@ impl<'a> Lexer<'a> {
     /// Return `IllegalCharacter` Error or `UnexpectedEnd` if EOF
     fn unexpected_err(&mut self) {
         let offset = self.current_offset();
-        match self.peek() {
-            Some(c) => self.error(diagnostics::InvalidCharacter(c, offset)),
-            None => self.error(diagnostics::UnexpectedEnd(offset)),
+        match self.peek_char() {
+            Some(c) => self.error(diagnostics::invalid_character(c, offset)),
+            None => self.error(diagnostics::unexpected_end(offset)),
         }
     }
 
@@ -294,12 +316,12 @@ impl<'a> Lexer<'a> {
             let offset = self.offset();
             self.token.start = offset;
 
-            let Some(byte) = self.source.peek_byte() else {
+            let Some(byte) = self.peek_byte() else {
                 return Kind::Eof;
             };
 
             // SAFETY: `byte` is byte value at current position in source
-            let kind = unsafe { handle_byte(byte, self) };
+            let kind = unsafe { self.handle_byte(byte) };
             if kind != Kind::Skip {
                 return kind;
             }
@@ -308,6 +330,8 @@ impl<'a> Lexer<'a> {
 }
 
 /// Call a closure while hinting to compiler that this branch is rarely taken.
+/// "Cold trampoline function", suggested in:
+/// <https://users.rust-lang.org/t/is-cold-the-only-reliable-way-to-hint-to-branch-predictor/106509/2>
 #[cold]
 pub fn cold_branch<F: FnOnce() -> T, T>(f: F) -> T {
     f()

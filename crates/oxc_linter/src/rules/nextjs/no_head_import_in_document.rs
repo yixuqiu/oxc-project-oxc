@@ -1,20 +1,15 @@
 use oxc_ast::{ast::ModuleDeclaration, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
 use crate::{context::LintContext, rule::Rule, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-next(no-head-import-in-document): Prevent usage of `next/head` in `pages/_document.js`.")]
-#[diagnostic(
-    severity(warning),
-    help("See https://nextjs.org/docs/messages/no-head-import-in-document")
-)]
-struct NoHeadImportInDocumentDiagnostic(#[label] pub Span);
+fn no_head_import_in_document_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Prevent usage of `next/head` in `pages/_document.js`.")
+        .with_help("See https://nextjs.org/docs/messages/no-head-import-in-document")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct NoHeadImportInDocument;
@@ -30,6 +25,7 @@ declare_oxc_lint!(
     /// ```javascript
     /// ```
     NoHeadImportInDocument,
+    nextjs,
     correctness
 );
 
@@ -52,14 +48,14 @@ impl Rule for NoHeadImportInDocument {
                 // check `_document.*` case
 
                 if file_name.starts_with("_document.") {
-                    ctx.diagnostic(NoHeadImportInDocumentDiagnostic(import_decl.span));
+                    ctx.diagnostic(no_head_import_in_document_diagnostic(import_decl.span));
                 // check `_document/index.*` case
                 } else if file_name.starts_with("index") {
                     if let Some(p) = full_file_path.parent() {
                         if let Some(file_name) = p.file_name() {
                             if let Some(file_name) = file_name.to_str() {
                                 if file_name.starts_with("_document") {
-                                    ctx.diagnostic(NoHeadImportInDocumentDiagnostic(
+                                    ctx.diagnostic(no_head_import_in_document_diagnostic(
                                         import_decl.span,
                                     ));
                                 }
@@ -74,8 +70,9 @@ impl Rule for NoHeadImportInDocument {
 
 #[test]
 fn test() {
-    use crate::tester::Tester;
     use std::path::PathBuf;
+
+    use crate::tester::Tester;
 
     let pass = vec![
         (
@@ -248,5 +245,6 @@ fn test() {
         ),
     ];
 
-    Tester::new(NoHeadImportInDocument::NAME, pass, fail).test_and_snapshot();
+    Tester::new(NoHeadImportInDocument::NAME, NoHeadImportInDocument::PLUGIN, pass, fail)
+        .test_and_snapshot();
 }

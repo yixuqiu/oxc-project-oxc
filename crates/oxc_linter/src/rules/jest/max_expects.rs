@@ -1,28 +1,21 @@
-use std::{collections::HashMap, hash::BuildHasherDefault};
+use oxc_ast::{ast::Expression, AstKind};
+use oxc_diagnostics::OxcDiagnostic;
+use oxc_index::Idx;
+use oxc_macros::declare_oxc_lint;
+use oxc_span::Span;
+use rustc_hash::FxHashMap;
 
 use crate::{
     context::LintContext,
     rule::Rule,
     utils::{collect_possible_jest_call_node, PossibleJestNode},
 };
-use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
-use oxc_macros::declare_oxc_lint;
-use oxc_span::Span;
-use rustc_hash::{FxHashMap, FxHasher};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "eslint-plugin-jest(max-expects): Enforces a maximum number assertion calls in a test body."
-)]
-#[diagnostic(
-    severity(warning),
-    help("Too many assertion calls ({0:?}) - maximum allowed is {1:?}")
-)]
-pub struct ExceededMaxAssertion(pub usize, pub usize, #[label] pub Span);
+fn exceeded_max_assertion(x0: usize, x1: usize, span2: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Enforces a maximum number assertion calls in a test body.")
+        .with_help(format!("Too many assertion calls ({x0:?}) - maximum allowed is {x1:?}"))
+        .with_label(span2)
+}
 
 #[derive(Debug, Clone)]
 pub struct MaxExpects {
@@ -68,6 +61,7 @@ declare_oxc_lint!(
     /// });
     /// ```
     MaxExpects,
+    jest,
     style,
 );
 
@@ -84,8 +78,7 @@ impl Rule for MaxExpects {
     }
 
     fn run_once(&self, ctx: &LintContext) {
-        let mut count_map: HashMap<usize, usize, BuildHasherDefault<FxHasher>> =
-            FxHashMap::default();
+        let mut count_map: FxHashMap<usize, usize> = FxHashMap::default();
 
         for possible_jest_node in &collect_possible_jest_call_node(ctx) {
             self.run(possible_jest_node, &mut count_map, ctx);
@@ -97,7 +90,7 @@ impl MaxExpects {
     fn run<'a>(
         &self,
         jest_node: &PossibleJestNode<'a, '_>,
-        count_map: &mut HashMap<usize, usize, BuildHasherDefault<FxHasher>>,
+        count_map: &mut FxHashMap<usize, usize>,
         ctx: &LintContext<'a>,
     ) {
         let node = jest_node.node;
@@ -113,7 +106,7 @@ impl MaxExpects {
 
             if let Some(count) = count_map.get(&position) {
                 if count > &self.max {
-                    ctx.diagnostic(ExceededMaxAssertion(*count, self.max, ident.span));
+                    ctx.diagnostic(exceeded_max_assertion(*count, self.max, ident.span));
                 } else {
                     count_map.insert(position, count + 1);
                 }
@@ -128,7 +121,7 @@ impl MaxExpects {
 fn test() {
     use crate::tester::Tester;
 
-    let pass = vec![
+    let mut pass = vec![
         ("test('should pass')", None),
         ("test('should pass', () => {})", None),
         ("test.skip('should pass', () => {})", None),
@@ -365,7 +358,7 @@ fn test() {
         ),
     ];
 
-    let fail = vec![
+    let mut fail = vec![
         (
             "
                 test('should not pass', function () {
@@ -478,5 +471,89 @@ fn test() {
         ),
     ];
 
-    Tester::new(MaxExpects::NAME, pass, fail).with_jest_plugin(true).test_and_snapshot();
+    let pass_vitest = vec![
+        ("test('should pass')", None),
+        ("test('should pass', () => {})", None),
+        ("test.skip('should pass', () => {})", None),
+        (
+            "test('should pass', () => {
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			    });",
+            None,
+        ),
+        (
+            "test('should pass', () => {
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			      });",
+            None,
+        ),
+        (
+            " test('should pass', async () => {
+			     expect.hasAssertions();
+			   
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toBeDefined();
+			     expect(true).toEqual(expect.any(Boolean));
+			      });",
+            None,
+        ),
+    ];
+
+    let fail_vitest = vec![
+        (
+            "test('should not pass', function () {
+			       expect(true).toBeDefined();
+			       expect(true).toBeDefined();
+			       expect(true).toBeDefined();
+			       expect(true).toBeDefined();
+			       expect(true).toBeDefined();
+			       expect(true).toBeDefined();
+			     });
+			      ",
+            None,
+        ),
+        (
+            "test('should not pass', () => {
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			    });
+			    test('should not pass', () => {
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			    });",
+            None,
+        ),
+        (
+            "test('should not pass', () => {
+			      expect(true).toBeDefined();
+			      expect(true).toBeDefined();
+			       });",
+            Some(serde_json::json!([{ "max": 1 }])),
+        ),
+    ];
+
+    pass.extend(pass_vitest);
+    fail.extend(fail_vitest);
+
+    Tester::new(MaxExpects::NAME, MaxExpects::PLUGIN, pass, fail)
+        .with_jest_plugin(true)
+        .test_and_snapshot();
 }

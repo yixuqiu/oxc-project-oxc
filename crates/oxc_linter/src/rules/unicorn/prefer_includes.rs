@@ -1,8 +1,5 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
@@ -14,10 +11,12 @@ use crate::{
     AstNode,
 };
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("eslint-plugin-unicorn(prefer-includes): Prefer `includes()` over `indexOf()` when checking for existence or non-existence.")]
-#[diagnostic(severity(warning))]
-struct PreferIncludesDiagnostic(#[label] pub Span);
+fn prefer_includes_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn(
+        "Prefer `includes()` over `indexOf()` when checking for existence or non-existence.",
+    )
+    .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferIncludes;
@@ -26,23 +25,27 @@ declare_oxc_lint!(
     /// ### What it does
     ///
     /// Prefer `includes()` over `indexOf()` when checking for existence or non-existence.
-    ///
     /// All built-ins have `.includes()` in addition to `.indexOf()`.
     ///
     /// ### Why is this bad?
     ///
     /// The `.includes()` method is more readable and less error-prone than `.indexOf()`.
     ///
-    /// ### Example
-    /// ```javascript
-    /// // bad
-    /// if (str.indexOf('foo') !== -1) { }
+    /// ### Examples
     ///
-    /// // good
+    /// Examples of **incorrect** code for this rule:
+    /// ```javascript
+    /// if (str.indexOf('foo') !== -1) { }
+    /// ```
+    ///
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// if (str.includes('foo')) { }
     /// ```
     PreferIncludes,
-    style
+    unicorn,
+    style,
+    pending
 );
 
 impl Rule for PreferIncludes {
@@ -51,7 +54,7 @@ impl Rule for PreferIncludes {
             return;
         };
 
-        let Expression::CallExpression(left_call_expr) = &bin_expr.left.without_parenthesized()
+        let Expression::CallExpression(left_call_expr) = &bin_expr.left.without_parentheses()
         else {
             return;
         };
@@ -68,25 +71,25 @@ impl Rule for PreferIncludes {
                 | BinaryOperator::StrictEquality
                 | BinaryOperator::Equality
         ) {
-            if !is_negative_one(bin_expr.right.without_parenthesized()) {
+            if !is_negative_one(bin_expr.right.without_parentheses()) {
                 return;
             }
 
-            ctx.diagnostic(PreferIncludesDiagnostic(
+            ctx.diagnostic(prefer_includes_diagnostic(
                 call_expr_method_callee_info(left_call_expr).unwrap().0,
             ));
         }
 
         if matches!(bin_expr.operator, BinaryOperator::GreaterEqualThan | BinaryOperator::LessThan)
         {
-            let Expression::NumericLiteral(num_lit) = bin_expr.right.without_parenthesized() else {
+            let Expression::NumericLiteral(num_lit) = bin_expr.right.without_parentheses() else {
                 return;
             };
 
-            if num_lit.raw != "0" {
+            if num_lit.raw.as_ref().unwrap() != "0" {
                 return;
             }
-            ctx.diagnostic(PreferIncludesDiagnostic(
+            ctx.diagnostic(prefer_includes_diagnostic(
                 call_expr_method_callee_info(left_call_expr).unwrap().0,
             ));
         }
@@ -102,11 +105,11 @@ fn is_negative_one(expr: &Expression) -> bool {
         return false;
     }
 
-    let Expression::NumericLiteral(num_lit) = unary_expr.argument.without_parenthesized() else {
+    let Expression::NumericLiteral(num_lit) = unary_expr.argument.without_parentheses() else {
         return false;
     };
 
-    num_lit.raw == "1"
+    num_lit.raw.as_ref().unwrap() == "1"
 }
 
 #[test]
@@ -141,5 +144,5 @@ fn test() {
         r"foo.indexOf(bar, 1) !== -1",
     ];
 
-    Tester::new(PreferIncludes::NAME, pass, fail).test_and_snapshot();
+    Tester::new(PreferIncludes::NAME, PreferIncludes::PLUGIN, pass, fail).test_and_snapshot();
 }

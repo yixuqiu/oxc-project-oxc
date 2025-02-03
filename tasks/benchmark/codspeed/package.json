@@ -1,10 +1,12 @@
 {
   "name": "oxc_benchmark",
   "version": "0.0.0",
-  "devDependencies": {
-    "axios": "^1.6.8",
-    "express": "^4.19.2",
-    "tar": "^7.0.1"
+  "scripts": {
+    "start": "node capture.mjs"
   },
-  "packageManager": "pnpm@9.0.6"
+  "devDependencies": {
+    "axios": "^1.7.2",
+    "express": "^4.19.2",
+    "tar": "^7.2.0"
+  }
 }

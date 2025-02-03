@@ -1,23 +1,19 @@
-use oxc_ast::CommentKind;
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use cow_utils::CowUtils;
+use oxc_ast::Comment;
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 
-use crate::fixer::Fix;
-use crate::{context::LintContext, rule::Rule};
+use crate::{
+    context::{ContextHost, LintContext},
+    rule::Rule,
+};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error(
-    "typescript-eslint(prefer-ts-expect-error): Enforce using `@ts-expect-error` over `@ts-ignore`"
-)]
-#[diagnostic(
-    severity(warning),
-    help("Use \"@ts-expect-error\" to ensure an error is actually being suppressed.")
-)]
-struct PreferTsExpectErrorDiagnostic(#[label] pub Span);
+fn prefer_ts_expect_error_diagnostic(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Enforce using `@ts-expect-error` over `@ts-ignore`")
+        .with_help("Use \"@ts-expect-error\" to ensure an error is actually being suppressed.")
+        .with_label(span)
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PreferTsExpectError;
@@ -35,7 +31,7 @@ declare_oxc_lint!(
     /// This is dangerous, as if a new error arises on that line it'll be suppressed by the forgotten about @ts-ignore, and so be missed.
     ///
     /// ### Example
-    /// ```javascript
+    /// ```ts
     /// // @ts-ignore
     /// const str: string = 1;
     ///
@@ -46,53 +42,59 @@ declare_oxc_lint!(
     /// const multiLine: number = 'value';
     /// ```
     PreferTsExpectError,
-    pedantic
+    typescript,
+    pedantic,
+    fix
 );
 
 impl Rule for PreferTsExpectError {
     fn run_once(&self, ctx: &LintContext) {
-        let comments = ctx.semantic().trivias().comments();
+        let comments = ctx.semantic().comments();
 
-        for (kind, span) in comments {
-            let raw = span.source_text(ctx.semantic().source_text());
+        for comment in comments {
+            let raw = ctx.source_range(comment.content_span());
 
-            if !is_valid_ts_ignore_present(kind, raw) {
+            if !is_valid_ts_ignore_present(*comment, raw) {
                 continue;
             }
 
-            if kind.is_single_line() {
-                let comment_span = Span::new(span.start - 2, span.end);
-                ctx.diagnostic_with_fix(PreferTsExpectErrorDiagnostic(comment_span), || {
-                    Fix::new(
-                        format!("//{}", raw.replace("@ts-ignore", "@ts-expect-error")),
+            if comment.is_line() {
+                let comment_span = comment.span;
+                ctx.diagnostic_with_fix(prefer_ts_expect_error_diagnostic(comment_span), |fixer| {
+                    fixer.replace(
                         comment_span,
+                        format!("//{}", raw.cow_replace("@ts-ignore", "@ts-expect-error")),
                     )
                 });
             } else {
-                let comment_span = Span::new(span.start - 2, span.end + 2);
-                ctx.diagnostic_with_fix(PreferTsExpectErrorDiagnostic(comment_span), || {
-                    Fix::new(
-                        format!("/*{}*/", raw.replace("@ts-ignore", "@ts-expect-error")),
+                let comment_span = comment.span;
+                ctx.diagnostic_with_fix(prefer_ts_expect_error_diagnostic(comment_span), |fixer| {
+                    fixer.replace(
                         comment_span,
+                        format!("/*{}*/", raw.cow_replace("@ts-ignore", "@ts-expect-error")),
                     )
                 });
             }
         }
     }
+
+    fn should_run(&self, ctx: &ContextHost) -> bool {
+        ctx.source_type().is_typescript()
+    }
 }
 
-fn get_last_comment_line(comment: CommentKind, raw: &str) -> String {
-    if comment.is_single_line() {
+fn get_last_comment_line(comment: Comment, raw: &str) -> String {
+    if comment.is_line() {
         return String::from(raw);
     }
 
-    return String::from(raw.lines().last().unwrap_or(raw));
+    String::from(raw.lines().last().unwrap_or(raw))
 }
 
-fn is_valid_ts_ignore_present(comment: CommentKind, raw: &str) -> bool {
+fn is_valid_ts_ignore_present(comment: Comment, raw: &str) -> bool {
     let line = get_last_comment_line(comment, raw);
 
-    if comment.is_single_line() {
+    if comment.is_line() {
         test_single_line_comment(&line)
     } else {
         test_multi_line_comment(&line)
@@ -214,5 +216,7 @@ console.log('hello');
         ),
     ];
 
-    Tester::new(PreferTsExpectError::NAME, pass, fail).expect_fix(fix).test_and_snapshot();
+    Tester::new(PreferTsExpectError::NAME, PreferTsExpectError::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

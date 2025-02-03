@@ -1,16 +1,14 @@
+#![allow(clippy::print_stdout, clippy::disallowed_methods)]
 use std::path::{Path, PathBuf};
 
-mod babel;
 mod diff;
 mod request;
+mod snapshot;
 mod test_file;
 
-pub use crate::{
-    babel::{BabelOptions, TestOs},
-    request::agent,
-    test_file::*,
-};
 pub use diff::print_diff_in_terminal;
+
+pub use crate::{request::agent, snapshot::Snapshot, test_file::*};
 
 /// # Panics
 /// Invalid Project Root
@@ -20,5 +18,5 @@ pub fn project_root() -> PathBuf {
 
 /// Normalizes the path when on Windows to using forward slash delimiters.
 pub fn normalize_path<P: AsRef<Path>>(path: P) -> String {
-    path.as_ref().display().to_string().replace('\\', "/")
+    path.as_ref().to_string_lossy().replace('\\', "/")
 }

@@ -1,21 +1,18 @@
 use oxc_ast::{ast::Expression, AstKind};
-use oxc_diagnostics::{
-    miette::{self, Diagnostic},
-    thiserror::Error,
-};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_macros::declare_oxc_lint;
 use oxc_span::Span;
 use oxc_syntax::operator::{BinaryOperator, LogicalOperator};
 
-use crate::{context::LintContext, rule::Rule, utils::is_same_reference, AstNode};
+use crate::{context::LintContext, rule::Rule, utils::is_same_expression, AstNode};
 
-#[derive(Debug, Error, Diagnostic)]
-#[error("oxc(double-comparisons): Unexpected double comparisons.")]
-#[diagnostic(
-    severity(warning),
-    help("This logical expression can be simplified. Try using the `{1}` operator instead.")
-)]
-struct DoubleComparisonsDiagnostic(#[label] pub Span, &'static str);
+fn double_comparisons_diagnostic(span: Span, operator: &str) -> OxcDiagnostic {
+    OxcDiagnostic::warn("Unexpected double comparisons.")
+        .with_help(format!(
+            "This logical expression can be simplified. Try using the `{operator}` operator instead."
+        ))
+        .with_label(span)
+}
 
 /// <https://rust-lang.github.io/rust-clippy/master/index.html#/double_comparisons>
 #[derive(Debug, Default, Clone)]
@@ -31,17 +28,22 @@ declare_oxc_lint!(
     /// Redundant comparisons can be confusing and make code harder to understand.
     ///
     /// ### Example
+    ///
+    /// Examples of **incorrect** code for this rule:
     /// ```javascript
-    /// // Bad
     /// x === y || x < y;
     /// x < y || x === y;
+    /// ```
     ///
-    /// // Good
+    /// Examples of **correct** code for this rule:
+    /// ```javascript
     /// x <= y;
     /// x >= y;
     /// ```
     DoubleComparisons,
+    oxc,
     correctness,
+    fix
 );
 
 #[allow(clippy::similar_names)]
@@ -68,8 +70,8 @@ impl Rule for DoubleComparisons {
         };
 
         // check that (LLHS === RLHS && LRHS === RRHS) || (LLHS === RRHS && LRHS === RLHS)
-        if !((is_same_reference(llhs, rlhs, ctx) && is_same_reference(lrhs, rrhs, ctx))
-            || (is_same_reference(llhs, rrhs, ctx) && is_same_reference(lrhs, rlhs, ctx)))
+        if !((is_same_expression(llhs, rlhs, ctx) && is_same_expression(lrhs, rrhs, ctx))
+            || (is_same_expression(llhs, rrhs, ctx) && is_same_expression(lrhs, rlhs, ctx)))
         {
             return;
         }
@@ -87,7 +89,22 @@ impl Rule for DoubleComparisons {
             _ => return,
         };
 
-        ctx.diagnostic(DoubleComparisonsDiagnostic(logical_expr.span, new_op));
+        ctx.diagnostic_with_fix(
+            double_comparisons_diagnostic(logical_expr.span, new_op),
+            |fixer| {
+                let modified_code = {
+                    let mut codegen = fixer.codegen();
+                    codegen.print_expression(llhs);
+                    codegen.print_ascii_byte(b' ');
+                    codegen.print_str(new_op);
+                    codegen.print_ascii_byte(b' ');
+                    codegen.print_expression(lrhs);
+                    codegen.into_source_text()
+                };
+
+                fixer.replace(logical_expr.span, modified_code)
+            },
+        );
     }
 }
 
@@ -130,5 +147,22 @@ fn test() {
         "x > y || x === y",
     ];
 
-    Tester::new(DoubleComparisons::NAME, pass, fail).test_and_snapshot();
+    let fix = vec![
+        ("x == y || x < y", "x <= y"),
+        ("x < y || x == y", "x <= y"),
+        ("x == y || x > y", "x >= y"),
+        ("x > y || x == y", "x >= y"),
+        ("x < y || x > y", "x != y"),
+        ("x > y || x < y", "x != y"),
+        ("x <= y && x >= y", "x == y"),
+        ("x >= y && x <= y", "x == y"),
+        ("x === y || x < y", "x <= y"),
+        ("x < y || x === y", "x <= y"),
+        ("x === y || x > y", "x >= y"),
+        ("x > y || x === y", "x >= y"),
+    ];
+
+    Tester::new(DoubleComparisons::NAME, DoubleComparisons::PLUGIN, pass, fail)
+        .expect_fix(fix)
+        .test_and_snapshot();
 }

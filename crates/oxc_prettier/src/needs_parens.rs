@@ -1,18 +1,12 @@
 //! Direct port of needs-parens for adding or removing parentheses.
 //!
-//! See <https://github.com/prettier/prettier/blob/main/src/language-js/needs-parens.js>
+//! See <https://github.com/prettier/prettier/blob/3.3.3/src/language-js/needs-parens.js>
 
-#![allow(
-    clippy::unused_self,
-    clippy::match_same_arms,
-    clippy::match_like_matches_macro,
-    clippy::single_match
-)]
 use oxc_ast::{
     ast::{
         match_member_expression, AssignmentTarget, ChainElement, ExportDefaultDeclarationKind,
-        Expression, ForStatementInit, ForStatementLeft, MemberExpression, ModuleDeclaration,
-        ObjectExpression, SimpleAssignmentTarget,
+        Expression, ForStatementInit, ForStatementLeft, MemberExpression, ObjectExpression,
+        SimpleAssignmentTarget,
     },
     AstKind,
 };
@@ -22,18 +16,11 @@ use oxc_syntax::{
     precedence::GetPrecedence,
 };
 
-use crate::{array, binaryish::BinaryishOperator, doc::Doc, ss, Prettier};
+use crate::{binaryish::BinaryishOperator, Prettier};
 
 impl<'a> Prettier<'a> {
-    pub(crate) fn wrap_parens(&mut self, doc: Doc<'a>, kind: AstKind<'a>) -> Doc<'a> {
-        if self.need_parens(kind) {
-            array![self, ss!("("), doc, ss!(")")]
-        } else {
-            doc
-        }
-    }
-
-    fn need_parens(&mut self, kind: AstKind<'a>) -> bool {
+    // NOTE: Why this takes `mut`...?
+    pub(crate) fn need_parens(&mut self, kind: AstKind<'a>) -> bool {
         if matches!(kind, AstKind::Program(_)) || kind.is_statement() || kind.is_declaration() {
             return false;
         }
@@ -53,6 +40,7 @@ impl<'a> Prettier<'a> {
 
     fn check_kind(&self, kind: AstKind<'a>) -> bool {
         let parent_kind = self.parent_kind();
+        let parent_parent_kind = self.parent_parent_kind();
         match kind {
             AstKind::NumericLiteral(literal) => {
                 matches!(parent_kind, AstKind::MemberExpression(e) if e.object().span() == literal.span)
@@ -96,6 +84,17 @@ impl<'a> Prettier<'a> {
                 }
                 AstKind::ExpressionStatement(_) => {
                     matches!(assign_expr.left, AssignmentTarget::ObjectAssignmentTarget(_))
+                }
+                AstKind::SequenceExpression(sequence_expr) => {
+                    !matches!(parent_parent_kind, Some(AstKind::ForStatement(for_stat))
+                        if for_stat
+                            .init
+                            .as_ref()
+                            .is_some_and(|e| e.span() == sequence_expr.span)
+                            || for_stat
+                                .update
+                                .as_ref()
+                                .is_some_and(|e| e.span() == sequence_expr.span))
                 }
                 _ => true,
             },
@@ -147,7 +146,7 @@ impl<'a> Prettier<'a> {
                 | AstKind::SpreadElement(_)
                 | AstKind::BinaryExpression(_)
                 | AstKind::LogicalExpression(_)
-                | AstKind::ModuleDeclaration(ModuleDeclaration::ExportDefaultDeclaration(_))
+                | AstKind::ExportDefaultDeclaration(_)
                 | AstKind::AwaitExpression(_)
                 | AstKind::JSXSpreadAttribute(_)
                 | AstKind::TSAsExpression(_)
@@ -212,13 +211,13 @@ impl<'a> Prettier<'a> {
                                 && !e.decorators.is_empty()
                                 && e.span == h.span() =>
                         {
-                            return true
+                            return true;
                         }
                         _ => {}
                     }
                 }
             }
-            AstKind::ModuleDeclaration(ModuleDeclaration::ExportDefaultDeclaration(decl)) => {
+            AstKind::ExportDefaultDeclaration(decl) => {
                 return matches!(
                     decl.declaration,
                     ExportDefaultDeclarationKind::SequenceExpression(_)
@@ -335,7 +334,7 @@ impl<'a> Prettier<'a> {
                 .init
                 .as_ref()
                 .and_then(ForStatementInit::as_expression)
-                .map_or(false, |e| Self::starts_with_no_lookahead_token(e, ident.span)),
+                .is_some_and(|e| Self::starts_with_no_lookahead_token(e, ident.span)),
             AstKind::ForInStatement(stmt) => {
                 if let Some(target) = stmt.left.as_assignment_target() {
                     if let Some(e) = target.as_member_expression() {
@@ -362,13 +361,12 @@ impl<'a> Prettier<'a> {
     fn check_update_unary(&self, span: Span) -> bool {
         match self.parent_kind() {
             AstKind::MemberExpression(member_expr) => member_expr.object().span() == span,
-            AstKind::TaggedTemplateExpression(_) => true,
             AstKind::CallExpression(call_expr) => call_expr.callee.span() == span,
             AstKind::NewExpression(new_expr) => new_expr.callee.span() == span,
             AstKind::BinaryExpression(bin_expr) => {
                 bin_expr.left.span() == span && bin_expr.operator == BinaryOperator::Exponential
             }
-            AstKind::TSNonNullExpression(_) => true,
+            AstKind::TaggedTemplateExpression(_) | AstKind::TSNonNullExpression(_) => true,
             _ => false,
         }
     }
@@ -395,13 +393,14 @@ impl<'a> Prettier<'a> {
         let current_kind = self.current_kind();
         let parent_kind = self.parent_kind();
         match parent_kind {
-            AstKind::TSAsExpression(_) => return !self.is_binary_cast_expression(span),
-            AstKind::TSSatisfiesExpression(_) => return !self.is_binary_cast_expression(span),
+            AstKind::TSAsExpression(_) | AstKind::TSSatisfiesExpression(_) => {
+                return !self.is_binary_cast_expression(span);
+            }
             AstKind::ConditionalExpression(_) => return self.is_binary_cast_expression(span),
             AstKind::NewExpression(new_expr) => return new_expr.callee.span() == span,
             AstKind::CallExpression(new_expr) => return new_expr.callee.span() == span,
             AstKind::Class(class) => {
-                return class.super_class.as_ref().is_some_and(|e| e.span() == span)
+                return class.super_class.as_ref().is_some_and(|e| e.span() == span);
             }
             AstKind::TSTypeAssertion(_)
             | AstKind::TaggedTemplateExpression(_)
@@ -413,10 +412,10 @@ impl<'a> Prettier<'a> {
             | AstKind::UpdateExpression(_) => return true,
             AstKind::MemberExpression(member_expr) => return member_expr.object().span() == span,
             AstKind::AssignmentExpression(assign_expr) => {
-                return assign_expr.left.span() == span && self.is_binary_cast_expression(span)
+                return assign_expr.left.span() == span && self.is_binary_cast_expression(span);
             }
             AstKind::AssignmentPattern(assign_pat) => {
-                return assign_pat.left.span() == span && self.is_binary_cast_expression(span)
+                return assign_pat.left.span() == span && self.is_binary_cast_expression(span);
             }
             AstKind::LogicalExpression(parent_logical_expr) => {
                 if let AstKind::LogicalExpression(logical_expr) = current_kind {
@@ -494,10 +493,7 @@ impl<'a> Prettier<'a> {
 
     fn should_wrap_function_for_export_default(&mut self) -> bool {
         let kind = self.current_kind();
-        let b = matches!(
-            self.parent_kind(),
-            AstKind::ModuleDeclaration(ModuleDeclaration::ExportDefaultDeclaration(_))
-        );
+        let b = matches!(self.parent_kind(), AstKind::ExportDefaultDeclaration(_));
         if matches!(kind, AstKind::Function(f) if f.is_expression())
             || matches!(kind, AstKind::Class(c) if c.is_expression())
         {
@@ -568,7 +564,9 @@ impl<'a> Prettier<'a> {
             Expression::BinaryExpression(e) => Self::starts_with_no_lookahead_token(&e.left, span),
             Expression::LogicalExpression(e) => Self::starts_with_no_lookahead_token(&e.left, span),
             Expression::AssignmentExpression(e) => match &e.left {
-                AssignmentTarget::AssignmentTargetIdentifier(_) => false,
+                AssignmentTarget::AssignmentTargetIdentifier(_)
+                | AssignmentTarget::ArrayAssignmentTarget(_)
+                | AssignmentTarget::ObjectAssignmentTarget(_) => false,
                 AssignmentTarget::ComputedMemberExpression(e) => {
                     Self::starts_with_no_lookahead_token(&e.object, span)
                 }
@@ -590,8 +588,9 @@ impl<'a> Prettier<'a> {
                 AssignmentTarget::TSTypeAssertion(e) => {
                     Self::starts_with_no_lookahead_token(&e.expression, span)
                 }
-                AssignmentTarget::ArrayAssignmentTarget(_)
-                | AssignmentTarget::ObjectAssignmentTarget(_) => false,
+                AssignmentTarget::TSInstantiationExpression(e) => {
+                    Self::starts_with_no_lookahead_token(&e.expression, span)
+                }
             },
             match_member_expression!(Expression) => {
                 Self::starts_with_no_lookahead_token(e.to_member_expression().object(), span)
@@ -636,15 +635,20 @@ impl<'a> Prettier<'a> {
                         SimpleAssignmentTarget::TSTypeAssertion(e) => {
                             Self::starts_with_no_lookahead_token(&e.expression, span)
                         }
+                        SimpleAssignmentTarget::TSInstantiationExpression(e) => {
+                            Self::starts_with_no_lookahead_token(&e.expression, span)
+                        }
                     }
             }
-            Expression::SequenceExpression(e) => e
-                .expressions
-                .first()
-                .map_or(false, |e| Self::starts_with_no_lookahead_token(e, span)),
+            Expression::SequenceExpression(e) => {
+                e.expressions.first().is_some_and(|e| Self::starts_with_no_lookahead_token(e, span))
+            }
             Expression::ChainExpression(e) => match &e.expression {
                 ChainElement::CallExpression(e) => {
                     Self::starts_with_no_lookahead_token(&e.callee, span)
+                }
+                ChainElement::TSNonNullExpression(e) => {
+                    Self::starts_with_no_lookahead_token(&e.expression, span)
                 }
                 ChainElement::ComputedMemberExpression(e) => {
                     Self::starts_with_no_lookahead_token(&e.object, span)
